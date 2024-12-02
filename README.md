@@ -13,7 +13,7 @@
 </h4>
 
 <h3 align="center">
-  <a href="tbd", target="_blank">Paper</a> | 
+  <a href="https://arxiv.org/abs/2411.19824", target="_blank">Paper</a> | 
   <a href="https://ChiSu001.github.io/SAT-HMR/", target="_blank">Project Page</a> |
   <a href="https://youtu.be/tqURcr_nCQY", target="_blank">Video</a> 
 </h3>
@@ -144,11 +144,14 @@ Coming soon.
 
 If you find this code useful for your research, please consider citing our paper:
 ```bibtex
-@article{su2024sathmr,
-	title={SAT-HMR: Real-Time Multi-Person 3D Mesh Estimation via Scale-Adaptive Tokens},
-	author={Su, Chi and Ma, Xiaoxuan and Su, Jiajun and Wang, Yizhou},
-	journal={arXiv preprint arXiv},
-	year={2024}
+@misc{su2024sathmrrealtimemultiperson3d,
+      title={SAT-HMR: Real-Time Multi-Person 3D Mesh Estimation via Scale-Adaptive Tokens}, 
+      author={Chi Su and Xiaoxuan Ma and Jiajun Su and Yizhou Wang},
+      year={2024},
+      eprint={2411.19824},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2411.19824}, 
 }
 ```
 
