@@ -144,15 +144,12 @@ Coming soon.
 
 If you find this code useful for your research, please consider citing our paper:
 ```bibtex
-@misc{su2024sathmrrealtimemultiperson3d,
-      title={SAT-HMR: Real-Time Multi-Person 3D Mesh Estimation via Scale-Adaptive Tokens}, 
-      author={Chi Su and Xiaoxuan Ma and Jiajun Su and Yizhou Wang},
-      year={2024},
-      eprint={2411.19824},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2411.19824}, 
-}
+@article{su2024sathmr,
+      title={SAT-HMR: Real-Time Multi-Person 3D Mesh Estimation via Scale-Adaptive Tokens},
+      author={Su, Chi and Ma, Xiaoxuan and Su, Jiajun and Wang, Yizhou},
+      journal={arXiv preprint arXiv:2411.19824},
+      year={2024}
+    }
 ```
 
 ## Acknowledgement
