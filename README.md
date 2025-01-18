@@ -1,23 +1,6 @@
 
 <h1 align="center">SAT-HMR: Real-Time Multi-Person 3D Mesh Estimation via Scale-Adaptive Tokens</h1>
 
-<a href="https://pytorch.org/get-started/locally/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white"></a> 
-[![arXiv](https://img.shields.io/badge/arXiv-2411.19824-b31b1b.svg)](https://arxiv.org/abs/2411.19824) 
-<a href="https://ChiSu001.github.io/SAT-HMR"><img alt="Project" src="https://img.shields.io/badge/-Project%20Page-lightgrey?logo=Google%20Chrome&color=informational&logoColor=white"></a> 
-<a href="https://youtu.be/tqURcr_nCQY"><img alt="Demo" src="https://img.shields.io/badge/-Demo-ea3323?logo=youtube"></a> 
-[![Hugging Face Models](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Models-ffab41)](https://huggingface.co/ChiSu001/SAT-HMR)
-
-<div align="center">
-  <img src="figures/results.png" width="70%">
-  <img src="figures/results_3d.gif" width="29%">
-</div>
-
-## Introduction
-
-Offical [Pytorch](https://pytorch.org/) implementation of our paper:
-
-<h3 align="center">SAT-HMR: Real-Time Multi-Person 3D Mesh Estimation via Scale-Adaptive Tokens</h3>
-
 <h4 align="center" style="text-decoration: none;">
   <a href="https://github.com/ChiSu001/", target="_blank"><b>Chi Su</b></a>
   ,
@@ -29,9 +12,21 @@ Offical [Pytorch](https://pytorch.org/) implementation of our paper:
 
 </h4>
 
+<div align="center">
+  <a href="https://pytorch.org/get-started/locally/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white"></a> 
+  <a href="https://arxiv.org/abs/2411.19824"><img alt="arXiv" src="https://img.shields.io/badge/arXiv-2411.19824-b31b1b.svg"></a> 
+  <a href="https://ChiSu001.github.io/SAT-HMR"><img alt="Project" src="https://img.shields.io/badge/-Project%20Page-lightgrey?logo=Google%20Chrome&color=informational&logoColor=white"></a> 
+  <a href="https://youtu.be/tqURcr_nCQY"><img alt="Video" src="https://img.shields.io/badge/-Video-ea3323?logo=youtube"></a> 
+  <a href="https://huggingface.co/ChiSu001/SAT-HMR"><img alt="Hugging Face Models" src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Models-ffab41"></a> 
+</div>
 
 
-<!-- <h3> Overview of SAT-HMR </h3> -->
+<div align="center">
+  <img src="figures/results.png" width="70%">
+  <img src="figures/results_3d.gif" width="29%">
+</div>
+
+<h3> Overview of SAT-HMR </h3>
 
 <p align="center">
   <img src="figures/pipeline.png"/>
