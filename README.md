@@ -1,6 +1,23 @@
 
 <h1 align="center">SAT-HMR: Real-Time Multi-Person 3D Mesh Estimation via Scale-Adaptive Tokens</h1>
 
+<a href="https://pytorch.org/get-started/locally/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white"></a> 
+[![arXiv](https://img.shields.io/badge/arXiv-2411.19824-b31b1b.svg)](https://arxiv.org/abs/2411.19824) 
+<a href="https://ChiSu001.github.io/SAT-HMR"><img alt="Project" src="https://img.shields.io/badge/-Project%20Page-lightgrey?logo=Google%20Chrome&color=informational&logoColor=white"></a> 
+<a href="https://youtu.be/tqURcr_nCQY"><img alt="Demo" src="https://img.shields.io/badge/-Demo-ea3323?logo=youtube"></a> 
+[![Hugging Face Models](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Models-ffab41)](https://huggingface.co/ChiSu001/SAT-HMR)
+
+<div align="center">
+  <img src="figures/results.png" width="70%">
+  <img src="figures/results_3d.gif" width="29%">
+</div>
+
+## Introduction
+
+Offical [Pytorch](https://pytorch.org/) implementation of our paper:
+
+<h3 align="center">SAT-HMR: Real-Time Multi-Person 3D Mesh Estimation via Scale-Adaptive Tokens</h3>
+
 <h4 align="center" style="text-decoration: none;">
   <a href="https://github.com/ChiSu001/", target="_blank"><b>Chi Su</b></a>
   ,
@@ -12,18 +29,9 @@
 
 </h4>
 
-<h3 align="center">
-  <a href="https://arxiv.org/abs/2411.19824", target="_blank">Paper</a> | 
-  <a href="https://ChiSu001.github.io/SAT-HMR/", target="_blank">Project Page</a> |
-  <a href="https://youtu.be/tqURcr_nCQY", target="_blank">Video</a> 
-</h3>
 
-<div align="center">
-  <img src="figures/results.png" width="70%">
-  <img src="figures/results_3d.gif" width="29%">
-</div>
 
-<h3> Overview of SAT-HMR </h3>
+<!-- <h3> Overview of SAT-HMR </h3> -->
 
 <p align="center">
   <img src="figures/pipeline.png"/>
@@ -78,7 +86,7 @@ pip install -r requirements.txt
 
 2. Download DINOv2 pretrained weights from [their official repository](https://github.com/facebookresearch/dinov2?tab=readme-ov-file#pretrained-models). We use `ViT-B/14 distilled (without registers)`. Please put `dinov2_vitb14_pretrain.pth` to `${Project}/weights/dinov2`. These weights will be used to initialize our encoder. **You can skip this step if you are not going to train SAT-HMR.**
 
-3. Download pretrained weights for inference and evaluation from [Google drive](https://drive.google.com/file/d/12tGbqcrJ8YACcrfi5qslZNEciIHxcScZ/view?usp=sharing). Please put them to `${Project}/weights/sat_hmr`.
+3. Download pretrained weights for inference and evaluation from [Google drive](https://drive.google.com/file/d/12tGbqcrJ8YACcrfi5qslZNEciIHxcScZ/view?usp=sharing) or [🤗HuggingFace](https://huggingface.co/ChiSu001/SAT-HMR/blob/main/weights/sat_hmr/sat_644.pth). Please put them to `${Project}/weights/sat_hmr`.
 
 Now the `weights` directory structure should be like this. 
 
