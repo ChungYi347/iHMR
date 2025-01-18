@@ -38,6 +38,8 @@
 
 ## News :triangular_flag_on_post:
 
+[2025/01/18] Model released on [🤗HuggingFace](https://huggingface.co/ChiSu001/SAT-HMR)!
+
 [2024/11/29] Inference code and weights released. Try inference your images!
 
 ## TODO :white_check_mark:
