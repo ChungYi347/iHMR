@@ -209,7 +209,7 @@ We recommend using a single GPU for evaluation as it provides more accurate resu
 # Multi-GPU configuration
 accelerate config
 # Evaluation
-accelerate main.py --mode eval --cfg ${cfg_name}
+accelerate launch main.py --mode eval --cfg ${cfg_name}
 ```
 
 ## Citing
