@@ -1,0 +1,12 @@
+model: default
+
+pretrain: True
+pretrain_path: './weights/sat_hmr/sat_644_agora.pth'
+
+eval_datasets_used: ['agora']
+eval_datasets_split: ['test']
+eval_vis_num: 20
+conf_thresh: [0.5]
+eval_batch_size: 12
+eval_num_workers: 8
+distributed_eval: True

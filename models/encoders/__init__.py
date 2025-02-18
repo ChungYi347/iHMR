@@ -21,7 +21,7 @@ def build_encoder(args):
             interpolate_offset = 0.1,
             num_additional_blocks = num_additional_blocks)
         if args.mode.lower() == 'train':
-            weights = torch.load(dinov2_vitb14_path)
+            weights = torch.load(dinov2_vitb14_path, weights_only=False)
     elif args.encoder == 'vitl':
         model = vit_large(img_size = 518,
             patch_size  = 14,
@@ -33,7 +33,7 @@ def build_encoder(args):
             interpolate_offset = 0.1,
             num_additional_blocks = num_additional_blocks)
         if args.mode.lower() == 'train':
-            weights = torch.load(dinov2_vitl14_path)
+            weights = torch.load(dinov2_vitl14_path, weights_only=False)
     else:
         raise NotImplementedError
     

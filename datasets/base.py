@@ -43,8 +43,7 @@ class BASE(Dataset):
         if self.mode == 'train' and aug_cfg is None:
             aug_cfg = {'rot_range': [-15, 15],
                        'scale_range': [0.8, 1.8],
-                       'flip_ratio': 0.5,
-                       'crop_ratio': 0.}
+                       'flip_ratio': 0.5}
         self.aug_cfg = aug_cfg
 
         if human_type == 'smpl':
@@ -80,30 +79,14 @@ class BASE(Dataset):
             rot = random.uniform(*self.aug_cfg['rot_range'])
             flip = random.random() <= self.aug_cfg['flip_ratio']
             scale = random.uniform(*self.aug_cfg['scale_range'])
-            crop = random.random() <= self.aug_cfg['crop_ratio']
         else:
             rot = 0.
             flip = False
             scale = 1.
-            crop = False
 
-        return {'rot':rot, 'flip':flip, 'scale':scale, 'crop': crop}
+        return {'rot':rot, 'flip':flip, 'scale':scale}
 
-    def process_img(self, img, meta_data, rot = 0., flip = False, scale = 1.0, crop = False):
-        # randomly crop (similar to scale)
-        if self.mode == 'train' and crop:
-            
-            h, w = img.shape[:2]
-            if h < w :
-                clip_ratio = random.uniform(0.5, 0.9)
-                tgt_h, tgt_w = int(h*clip_ratio), int(w*clip_ratio)
-                
-                img = img[:tgt_h,(w-tgt_w)//2:(w+tgt_w)//2,:].copy()
-                cam_intrinsics = meta_data['cam_intrinsics']
-                cam_intrinsics[:,0,2] -= (w-tgt_w)//2
-                meta_data.update({'cam_intrinsics': cam_intrinsics})
-
-
+    def process_img(self, img, meta_data, rot = 0., flip = False, scale = 1.0):
         # resize
         img_size = torch.tensor(img.shape[:2])
         if img_size[1] >= img_size[0]:
@@ -190,8 +173,8 @@ class BASE(Dataset):
         boxes = box_xyxy_to_cxcywh(torch.stack(bboxes_list)) / self.input_size
         boxes[...,2:] *= 1.2
         boxes = box_cxcywh_to_xyxy(boxes)
-        boxes[...,[0,2]] = boxes[...,[0,2]].clamp(min=0.01,max=(imgwidth-1)/self.input_size)
-        boxes[...,[1,3]] = boxes[...,[1,3]].clamp(min=0.01,max=(imght-1)/self.input_size)
+        boxes[...,[0,2]] = boxes[...,[0,2]].clamp(min=0.000001,max=(imgwidth-1)/self.input_size)
+        boxes[...,[1,3]] = boxes[...,[1,3]].clamp(min=0.000001,max=(imght-1)/self.input_size)
         boxes = box_xyxy_to_cxcywh(boxes)
 
         meta_data.update({'boxes': boxes})
@@ -320,7 +303,7 @@ class BASE(Dataset):
         return
 
 
-    def process_data(self, img, raw_data, rot = 0., flip = False, scale = 1., crop = False):
+    def process_data(self, img, raw_data, rot = 0., flip = False, scale = 1.):
         meta_data = copy.deepcopy(raw_data)
         # prepare rotation augmentation mat.
         rot_aug_mat = torch.tensor([[cos(radians(-rot)), -sin(radians(-rot)), 0.],
@@ -328,7 +311,7 @@ class BASE(Dataset):
                             [0., 0., 1.]])
         meta_data.update({'rot_aug_mat': rot_aug_mat})
 
-        img = self.process_img(img, meta_data, rot, flip, scale, crop)
+        img = self.process_img(img, meta_data, rot, flip, scale)
 
         self.process_cam(meta_data, rot, flip, scale)
         self.process_smpl(meta_data, rot, flip, scale)
@@ -363,7 +346,7 @@ class BASE(Dataset):
         if self.use_sat:
             # scale map
             boxes = meta_data['boxes']
-            scales = boxes[:,2:].norm(p=2,dim=1)
+            scales = boxes[:,2:].norm(p=2,dim=1).clamp(0.,1.)
             v3ds = meta_data['verts']
             depths_norm = meta_data['depths'][:,1]
             cam_intrinsics = meta_data['cam_intrinsics']
@@ -408,7 +391,7 @@ class BASE(Dataset):
                     break
                 cnt+=1
                 if cnt >= 10:
-                    aug_dict.update({'rot':0., 'scale':1., 'crop': False})
+                    aug_dict.update({'rot':0., 'scale':1.})
                     img, meta_data = self.process_data(ori_img, raw_data, **aug_dict)
                     if meta_data['pnum'] == 0:
                         print('skipping: ' + meta_data['img_path'])
@@ -447,6 +430,7 @@ class BASE(Dataset):
         patch_size = 14
         if self.use_sat:
             patch_size = 56
+        # pad image to support pooling
         pad_img = np.zeros((math.ceil(img.shape[0]/patch_size)*patch_size, math.ceil(img.shape[1]/patch_size)*patch_size, 3), dtype=img.dtype)
         pad_img[:img.shape[0], :img.shape[1]] = img
         assert max(pad_img.shape[:2]) == self.input_size
@@ -460,10 +444,12 @@ class BASE(Dataset):
 
     def visualize(self, results_save_dir = None, vis_num = 100):
         if results_save_dir is None:
-            results_save_dir = os.path.join('datasets_visualization',f'{self.ds_name}_{self.split}')
+            results_save_dir = os.path.join('./datasets_visualization',f'{self.ds_name}_{self.split}')
         os.makedirs(results_save_dir, exist_ok=True)
 
         vis_interval = len(self)//vis_num
+        
+        print(f'Visualization results will be saved in {results_save_dir}')
 
         for idx in tqdm(range(len(self))):
             if idx % vis_interval != 0:

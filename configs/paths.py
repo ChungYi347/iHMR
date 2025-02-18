@@ -1,4 +1,4 @@
-dataset_root = '../datasets'
+dataset_root = '/DATA/disk0/suchi/sat_share/datasets'
 
 smpl_model_path = './weights/smpl_data'
 smpl_mean_path = './weights/smpl_data/smpl/smpl_mean_params.npz'

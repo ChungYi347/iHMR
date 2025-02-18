@@ -38,58 +38,6 @@ class HungarianMatcher(nn.Module):
         # self.focal_alpha = focal_alpha
 
     @torch.no_grad()
-    def forward_enc(self, outputs, targets):
-        """ Performs the matching
-        Params:
-            outputs: This is a dict that contains at least these entries:
-                 "pred_confs": Tensor of flattened confidence score, [total_lens, 1]
-                 "pred_boxes": Tensor of flattened boxes, [total_lens, 4]
-                 "lens": num of predictions for each sample in the batch, sum(lens) == total_lens
-            targets: This is a list of targets (len(targets) = batch_size), where each target is a dict containing:
-                 "boxes": Tensor of dim [num_target_boxes, 4] containing the target box coordinates
-        Returns:
-            A list of size batch_size, containing tuples of (index_i, index_j) where:
-                - index_i is the indices of the selected predictions (in order)
-                - index_j is the indices of the corresponding selected targets (in order)
-            For each batch element, it holds:
-                len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
-        """
-        out_conf = outputs['pred_confs']
-        out_bbox = outputs["pred_boxes"]
-        lens = outputs['lens']
-        assert len(lens) == len(targets)
-        assert tuple(out_conf.shape) == (sum(lens),1)
-        assert tuple(out_bbox.shape) == (sum(lens),4)       
-
-        # Also concat the target labels and boxes
-        tgt_bbox = torch.cat([v["boxes"] for v in targets])
-
-        # Compute the confidence cost.
-        alpha = 0.25
-        gamma = 2.0
-        cost_conf = alpha * ((1 - out_conf) ** gamma) * (-(out_conf + 1e-8).log())
-        # cost_conf = -(out_conf+1e-8).log()
-
-        # Compute the L1 cost between boxes
-        cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
-
-        # Compute the giou cost betwen boxes
-        # import ipdb; ipdb.set_trace()
-        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
-
-        # Final cost matrix
-        C = self.cost_conf*cost_conf + self.cost_bbox * cost_bbox + self.cost_giou * cost_giou
-        C = C.cpu()
-
-        sizes = [len(v["boxes"]) for v in targets]
-        idx=0
-        indices = []
-        for i, c in enumerate(C.split(sizes, -1)):
-            indices.append(linear_sum_assignment(c[idx:idx+lens[i]]))
-            idx += lens[i]
-        return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
-
-    @torch.no_grad()
     def forward(self, outputs, targets):
         """ Performs the matching
         Params:

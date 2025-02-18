@@ -109,47 +109,6 @@ class SetCriterion(nn.Module):
 
         return losses
 
-    def loss_boxes_enc(self, loss, outputs, targets, indices, num_instances, **kwargs):
-        """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
-           targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
-           The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
-        """
-        assert 'pred_boxes' in outputs
-        assert loss == 'boxes_enc'
-        loss = 'boxes'
-
-        valid_idx = torch.where(torch.cat([torch.ones(len(i), dtype=bool, device = self.device)*(loss in t) for t, (_, i) in zip(targets, indices)]))[0]
-        
-        if len(valid_idx) == 0:
-            return {loss: torch.tensor(0.).to(self.device)}
-
-        lens = outputs['lens']
-        pred_boxes = outputs['pred_boxes']
-        src = torch.cat([s[i] for s, (i, _) in zip(pred_boxes.split(lens), indices)], dim=0)[valid_idx]
-        target = torch.cat([t[loss][i] for t, (_, i) in zip(targets, indices) if loss in t], dim=0)
-        assert src.shape == target.shape
-        
-        src_boxes = src
-        target_boxes = target
-
-        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
-
-        losses = {}
-        losses['boxes'] = loss_bbox.sum() / num_instances
-
-        loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
-            box_ops.box_cxcywh_to_xyxy(src_boxes),
-            box_ops.box_cxcywh_to_xyxy(target_boxes)))
-        losses['giou'] = loss_giou.sum() / num_instances
-
-        # # calculate the x,y and h,w loss
-        # with torch.no_grad():
-        #     losses['loss_xy'] = loss_bbox[..., :2].sum() / num_boxes
-        #     losses['loss_hw'] = loss_bbox[..., 2:].sum() / num_boxes
-
-
-        return losses
-
     # For computing ['boxes', 'poses', 'betas', 'j3ds', 'j2ds'] losses
     def loss_L1(self, loss, outputs, targets, indices, num_instances, **kwargs):
         idx = self._get_src_permutation_idx(indices)
@@ -250,37 +209,6 @@ class SetCriterion(nn.Module):
 
         return losses
 
-    def loss_confs_enc(self, loss, outputs, targets, indices, num_instances, **kwargs):
-        assert loss == 'confs_enc'
-        loss = 'confs'
-
-        lens = outputs['lens']
-        pred_confs = outputs['pred_confs']
-        detection_valid_mask = torch.zeros_like(pred_confs,dtype=bool)
-        labels = torch.zeros_like(pred_confs)
-
-        cur = 0
-        idx = []
-        for i, (src, tgt) in enumerate(indices):
-            idx += (src + cur).tolist()
-            if targets[i]['detect_all_people']:
-                detection_valid_mask[cur:cur+lens[i]] = True
-            cur += lens[i]
-        detection_valid_mask[idx] = True
-        labels[idx] = 1
-
-        pred_confs = pred_confs.unsqueeze(0)
-        labels = labels.unsqueeze(0)
-        detection_valid_mask = detection_valid_mask.unsqueeze(0)
-        
-        losses = {}
-        # losses[loss] = focal_loss(pred_confs, labels, valid_mask = detection_valid_mask)
-        losses[loss] = focal_loss(pred_confs, labels)
-        return losses
-
-    def loss_L2(self, loss, outputs, targets, indices, num_instances, **kwargs):
-        pass
-
     def loss_absolute_depths(self, loss, outputs, targets, indices, num_instances, **kwargs):
         assert loss == 'depths' 
         losses = {}
@@ -321,8 +249,6 @@ class SetCriterion(nn.Module):
         loss_map = {
             'confs': self.loss_confs,
             'boxes': self.loss_boxes,
-            'confs_enc': self.loss_confs_enc,
-            'boxes_enc': self.loss_boxes_enc,
             'poses': self.loss_L1,
             'betas': self.loss_L1,
             'j3ds': self.loss_L1,
@@ -335,8 +261,7 @@ class SetCriterion(nn.Module):
 
 
     def get_valid_instances(self, targets):
-        # Compute the average number of target boxes accross all nodes, for normalization purposes
-        # Losses: 'confs','centers','anchors', 'poses', 'betas', 'j3ds', 'j2ds', 'depths', 'ages', 'heatmap'
+        # Compute the average number of GTs accross all nodes, for normalization purposes
         num_valid_instances = {}
         for loss in self.losses:
             num_instances = 0
@@ -373,7 +298,7 @@ class SetCriterion(nn.Module):
         # remove invalid information in targets
         for t in targets:
             if not t['3d_valid']:
-                for key in ['betas', 'kid_offsets', 'poses', 'j3ds', 'depths', 'focals']:
+                for key in ['betas', 'poses', 'j3ds', 'depths', 'focals']:
                     if key in t:
                         del t[key]
 

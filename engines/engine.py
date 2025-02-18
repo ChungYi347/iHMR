@@ -27,7 +27,8 @@ class Engine():
         self.conf_thresh = args.conf_thresh
         self.eval_func_maps = {'agora_validation': evaluate_agora,
                                 'bedlam_validation_6fps': evaluate_agora,
-                                'agora_test': test_agora}
+                                'agora_test': test_agora,
+                                '3dpw_test': evaluate_3dpw,}
         self.inference_func = inference
 
         if self.mode == 'train':
@@ -84,8 +85,8 @@ class Engine():
         # load weights
         if args.pretrain:
             self.accelerator.print(f'Loading pretrained weights: {args.pretrain_path}') 
-            state_dict = torch.load(args.pretrain_path)
-            self.unwrapped_model.load_state_dict(state_dict,strict=False)
+            state_dict = torch.load(args.pretrain_path, weights_only=False)
+            self.unwrapped_model.load_state_dict(state_dict, strict=False)
 
         # to gpu
         self.model = self.accelerator.prepare(self.unwrapped_model)
@@ -190,7 +191,7 @@ class Engine():
             if hasattr(args, 'ckpt_epoch'):
                 self.load_ckpt(args.ckpt_epoch,args.ckpt_step)    
             else:
-                self.accelerator.print('Auto resume from latest ckpt...')
+                self.accelerator.print('Auto resume from the latest ckpt...')
                 epoch, step = -1, -1
                 pattern = re.compile(r'epoch_(\d+)_step_(\d+)')
                 for folder_name in os.listdir(os.path.join(self.output_dir,'ckpts',self.exp_name)):
@@ -282,7 +283,7 @@ class Engine():
                 img_cnt *= self.accelerator.num_processes
             self.accelerator.print(f'Evaluate on {key}: {img_cnt} images')
             self.accelerator.print('Using following threshold(s): ', self.conf_thresh)
-            conf_thresh = self.conf_thresh if 'agora' in key or 'bedlam' in key else [0.2]
+            conf_thresh = self.conf_thresh  # if 'agora' in key or 'bedlam' in key else [0.2]
             for thresh in conf_thresh:
                 if self.accelerator.is_main_process or self.distributed_eval:
                     error_dict = self.eval_func_maps[key](model = unwrapped_model, 

@@ -1,6 +1,7 @@
+# Modified from agora_evaluation, OSX
 from itertools import product
 import numpy as np
-from .transforms import rigid_align
+from .transforms import rigid_align, pelvis_align, root_align
 
 def vectorize_distance(a, b):
     """
@@ -17,6 +18,17 @@ def vectorize_distance(a, b):
     b2 = np.tile ( np.sum ( b ** 2, axis=1 ), (N, 1) )
     dist = a2 + b2 - 2 * (a @ b.T)
     return np.sqrt(dist)
+
+
+
+# for agora evaluation
+def select_and_align(smpl_joints, smpl_verts, body_verts_ind):
+    joints = smpl_joints[:24, :]
+    verts = smpl_verts[body_verts_ind, :]
+    assert len(verts.shape) == 2
+    verts = pelvis_align(joints, verts)
+    joints = pelvis_align(joints)
+    return joints, verts
 
 
 def l2_error(j1, j2):

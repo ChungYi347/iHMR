@@ -3,8 +3,15 @@ from torch.utils.data.dataset import Dataset
 import numpy as np
 from .agora import AGORA
 from .bedlam import BEDLAM
+from .crowdpose import CROWDPOSE
+from .mpii import MPII
+from .coco import COCO
+from .pw3d import PW3D
+from .h36m import H36M
 
-datasets_dict = {'bedlam': BEDLAM, 'agora': AGORA}
+datasets_dict = {'bedlam': BEDLAM, 'agora': AGORA, 
+                 'crowdpose': CROWDPOSE, 'mpii': MPII, 
+                 'coco': COCO, '3dpw': PW3D, 'h36m': H36M}
 
 class MultipleDatasets(Dataset):
     def __init__(self, datasets_used, datasets_split = None, make_same_len = False, **kwargs):

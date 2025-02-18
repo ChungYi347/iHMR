@@ -10,9 +10,7 @@ from .base import BASE
 class BEDLAM(BASE):
     def __init__(self, split='train_6fps',**kwargs):
         super(BEDLAM, self).__init__(**kwargs)
-        assert split in ['train_1fps','train_3fps','train_6fps','validation_6fps']
-        assert not self.kid_offset
-
+        assert split in ['train_1fps', 'train_6fps','validation_6fps']
         self.ds_name = 'bedlam'
         self.dataset_path = os.path.join(dataset_root,'bedlam')
         annots_path = os.path.join(self.dataset_path,f'bedlam_smpl_{split}.npz')
@@ -22,17 +20,6 @@ class BEDLAM(BASE):
         
     def __len__(self):
         return len(self.img_names)
-
-    def cnt_instances(self):
-        ins_cnt = 0
-        for idx in tqdm(range(len(self))):
-            img_id = idx
-            img_name = self.img_names[img_id]
-            # ins_cnt += len(self.annots[img_name]['isValid'])
-            ins_cnt += len(self.annots[img_name]['shape'])
-            # tqdm.write(str(ins_cnt))
-
-        print(f'TOTAL: {ins_cnt}')
     
     def get_raw_data(self, idx):
 
@@ -60,12 +47,8 @@ class BEDLAM(BASE):
                 'cam_trans': cam_trans.float(),
                 'cam_intrinsics':cam_intrinsics.float(),
                 '3d_valid': True,
-                'age_valid': False,
                 'detect_all_people':True
                     }
-
-        if self.mode == 'eval':
-            raw_data['occ_level'] = torch.zeros(len(betas),dtype=int)
         
         return raw_data
 

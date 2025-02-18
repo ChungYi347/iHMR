@@ -65,9 +65,6 @@ class AGORA(BASE):
 
         kid = []
 
-        if self.mode == 'eval':
-            occ_leval_list = []
-
         for pNum in range(len(annots['isValid'])):
             if not annots['isValid'][pNum]:
                 continue
@@ -80,9 +77,6 @@ class AGORA(BASE):
             transl_list.append(torch.from_numpy(gt['transl'].flatten()))
 
             kid.append(annots['kid'][pNum])
-
-            if self.mode == 'eval':
-                occ_leval_list.append(int(annots['occlusion'][pNum]//10))
         
         betas = torch.stack(betas_list)
         poses = torch.stack(poses_list)
@@ -99,12 +93,8 @@ class AGORA(BASE):
                 'cam_trans': cam_trans.float(),
                 'cam_intrinsics':cam_intrinsics.float(),
                 '3d_valid': True,
-                'age_valid': True,
                 'detect_all_people':True
                     }
-
-        if self.mode == 'eval':
-            raw_data['occ_level'] = torch.tensor(occ_leval_list)
         
         return raw_data
 

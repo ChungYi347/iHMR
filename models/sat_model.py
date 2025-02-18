@@ -279,8 +279,8 @@ class Model(nn.Module):
             
             lvl0_pos_y_norm = (lvl0_pos_y.to(dtype=lvl0_tokens.dtype) + 0.5) / self.feature_size[0]
             lvl0_pos_x_norm = (lvl0_pos_x.to(dtype=lvl0_tokens.dtype) + 0.5) / self.feature_size[0]
-            pos_x_list = list(lvl0_pos_y_norm.split(lvl0_token_lens))
-            pos_y_list = list(lvl0_pos_x_norm.split(lvl0_token_lens))
+            pos_y_list = list(lvl0_pos_y_norm.split(lvl0_token_lens))
+            pos_x_list = list(lvl0_pos_x_norm.split(lvl0_token_lens))
             scale_map_dict = None
             # also create lvl_list for patch visualization
             lvl_list = [torch.zeros_like(pos,dtype=int) for pos in pos_x_list]

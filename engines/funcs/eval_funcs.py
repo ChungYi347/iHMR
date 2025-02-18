@@ -2,27 +2,18 @@ import os
 from tqdm.auto import tqdm
 import torch
 import numpy as np
-from utils.evaluation import cal_3d_position_error, match_2d_greedy, get_matching_dict, compute_prf1, vectorize_distance, calculate_iou
-from utils.transforms import pelvis_align, root_align, unNormalize
+from utils.evaluation import cal_3d_position_error, match_2d_greedy, get_matching_dict, compute_prf1, vectorize_distance, calculate_iou, select_and_align
+from utils.transforms import unNormalize
 from utils.visualization import tensor_to_BGR, pad_img
 from utils.visualization import vis_meshes_img, vis_boxes, vis_sat, vis_scale_img, get_colors_rgb
 from utils.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
-from utils.constants import human36_eval_joint, J24_TO_H36M, H36M_TO_MPII
+from utils.constants import H36M_EVAL_JOINTS
 import time
 import datetime
 import scipy.io as sio
 import cv2
 import zipfile
 import pickle
-
-# for agora evaluation
-def select_and_align(smpl_joints, smpl_verts, body_verts_ind):
-    joints = smpl_joints[:24, :]
-    verts = smpl_verts[body_verts_ind, :]
-    assert len(verts.shape) == 2
-    verts = pelvis_align(joints, verts)
-    joints = pelvis_align(joints)
-    return joints, verts
 
 
 # Modified from agora_evaluation
@@ -230,9 +221,9 @@ def evaluate_agora(model, eval_dataloader, conf_thresh,
     error_dict['recall'] = recall
     error_dict['f1'] = f1
 
-    error_dict['MPJPE'] = round(sum(mpjpe)/(len(mpjpe)-num_processes), 1)
+    error_dict['MPJPE'] = round(float(sum(mpjpe)/(len(mpjpe)-num_processes)), 1)
     error_dict['NMJE'] = round(error_dict['MPJPE'] / (f1), 1)
-    error_dict['MVE'] = round(sum(mve)/(len(mve)-num_processes), 1)
+    error_dict['MVE'] = round(float(sum(mve)/(len(mve)-num_processes)), 1)
     error_dict['NMVE'] = round(error_dict['MVE'] / (f1), 1)
 
     if has_kid:
@@ -241,11 +232,10 @@ def evaluate_agora(model, eval_dataloader, conf_thresh,
         error_dict['kid_recall'] = kid_recall
         error_dict['kid_f1'] = kid_f1
 
-        error_dict['kid-MPJPE'] = round(sum(kid_mpjpe)/(len(kid_mpjpe)-num_processes), 1)
+        error_dict['kid-MPJPE'] = round(float(sum(kid_mpjpe)/(len(kid_mpjpe)-num_processes)), 1)
         error_dict['kid-NMJE'] = round(error_dict['kid-MPJPE'] / (kid_f1), 1)
-        error_dict['kid-MVE'] = round(sum(kid_mve)/(len(kid_mve)-num_processes), 1)
+        error_dict['kid-MVE'] = round(float(sum(kid_mve)/(len(kid_mve)-num_processes)), 1)
         error_dict['kid-NMVE'] = round(error_dict['kid-MVE'] / (kid_f1), 1)
-
 
     if accelerator.is_main_process:
         with open(os.path.join(results_save_path,'results.txt'),'w') as f:
@@ -325,7 +315,7 @@ def test_agora(model, eval_dataloader, conf_thresh,
 
                 full_img = np.vstack([np.hstack([ori_img, mesh_img]),
                                       np.hstack([pred_scale_img, sat_img])])
-                cv2.imwrite(os.path.join(imgs_save_dir, f'{img_idx}_{img_name}.jpg'), full_img)
+                cv2.imwrite(os.path.join(imgs_save_dir, f'{img_idx}_{img_name}.png'), full_img)
 
             
             # submit
@@ -359,4 +349,168 @@ def test_agora(model, eval_dataloader, conf_thresh,
 
 
     return 'Results saved at: ' + os.path.join(results_save_path,'predictions')
+
+def evaluate_3dpw(model, eval_dataloader, conf_thresh,
+                        vis = True, vis_step = 40, results_save_path = None,
+                        distributed = False, accelerator = None):
+    assert results_save_path is not None
+    assert accelerator is not None
+    num_processes = accelerator.num_processes
+    
+    os.makedirs(results_save_path,exist_ok=True)
+    if vis:
+        imgs_save_dir = os.path.join(results_save_path, 'imgs')
+        os.makedirs(imgs_save_dir, exist_ok = True)
+    
+    step = 0
+    total_miss_count = 0
+    total_count = 0
+    total_fp = 0
+
+    mve, mpjpe, pa_mpjpe, pa_mve = [0.], [0.], [0.], [0.]
+    cur_device = next(model.parameters()).device
+    smpl_layer = model.human_model
+    smpl2h36m_regressor = torch.from_numpy(smpl_layer.smpl2h36m_regressor).float().to(cur_device)
+    
+    progress_bar = tqdm(total=len(eval_dataloader), disable=not accelerator.is_local_main_process)
+    progress_bar.set_description('evaluate')
+    for itr, (samples, targets) in enumerate(eval_dataloader):
+        samples=[sample.to(device = cur_device, non_blocking = True) for sample in samples]
+        with torch.no_grad():    
+           outputs = model(samples, targets)
+        bs = len(targets)
+        for idx in range(bs):
+            #gt 
+            gt_verts = targets[idx]['verts']
+            gt_transl = targets[idx]['transl']
+            gt_j3ds = torch.einsum('bik,ji->bjk', [gt_verts - gt_transl[:,None,:], smpl2h36m_regressor]) + gt_transl[:,None,:]
+
+            gt_verts = gt_verts.cpu().numpy()
+            gt_j3ds = gt_j3ds.cpu().numpy()
+            gt_j2ds = targets[idx]['j2ds'].cpu().numpy()[:,:24,:]
+
+            #pred
+            select_queries_idx = torch.where(outputs['pred_confs'][idx] > conf_thresh)[0]
+            
+            pred_verts = outputs['pred_verts'][idx][select_queries_idx].detach()
+            pred_transl = outputs['pred_transl'][idx][select_queries_idx].detach()
+            pred_j3ds = torch.einsum('bik,ji->bjk', [pred_verts - pred_transl[:,None,:], smpl2h36m_regressor]) + pred_transl[:,None,:]
+            
+            pred_verts = pred_verts.cpu().numpy()
+            pred_j3ds = pred_j3ds.cpu().numpy()
+            pred_j2ds = outputs['pred_j2ds'][idx][select_queries_idx].detach().cpu().numpy()[:,:24,:]
+
+
+            matched_verts_idx = []
+            assert len(gt_j2ds.shape) == 3 and len(pred_j2ds.shape) == 3
+            #matching
+            greedy_match = match_2d_greedy(pred_j2ds, gt_j2ds) # tuples are (idx_pred_kps, idx_gt_kps)
+            matchDict, falsePositive_count = get_matching_dict(greedy_match)
+
+            #align with matching result
+            gt_verts_list, pred_verts_list, gt_joints_list, pred_joints_list = [], [], [], []
+            gtIdxs = np.arange(len(gt_j3ds))
+            miss_flag = []
+            for gtIdx in gtIdxs:
+                gt_verts_list.append(gt_verts[gtIdx])
+                gt_joints_list.append(gt_j3ds[gtIdx])
+                if matchDict[str(gtIdx)] == 'miss' or matchDict[str(
+                        gtIdx)] == 'invalid':
+                    miss_flag.append(1)
+                    pred_verts_list.append([])
+                    pred_joints_list.append([])
+                else:
+                    miss_flag.append(0)
+                    pred_joints_list.append(pred_j3ds[matchDict[str(gtIdx)]])
+                    pred_verts_list.append(pred_verts[matchDict[str(gtIdx)]])
+                    matched_verts_idx.append(matchDict[str(gtIdx)])
+
+            #calculating 3d errors
+            for i, (gt3d, pred) in enumerate(zip(gt_joints_list, pred_joints_list)):
+                total_count += 1
+
+                # Get corresponding ground truth and predicted 3d joints and verts
+                if miss_flag[i] == 1:
+                    total_miss_count += 1
+                    continue
+
+                gt3d = gt3d.reshape(-1, 3)
+                pred3d = pred.reshape(-1, 3)
+                gt3d_verts = gt_verts_list[i].reshape(-1, 3)
+                pred3d_verts = pred_verts_list[i].reshape(-1, 3)
+
+                gt_pelvis = gt3d[[0],:].copy()
+                pred_pelvis = pred3d[[0],:].copy()
+
+                gt3d = (gt3d - gt_pelvis)[H36M_EVAL_JOINTS, :].copy()
+                gt3d_verts = (gt3d_verts - gt_pelvis).copy()
+                
+                pred3d = (pred3d - pred_pelvis)[H36M_EVAL_JOINTS, :].copy()
+                pred3d_verts = (pred3d_verts - pred_pelvis).copy()
+
+                #joints
+                error_j, pa_error_j = cal_3d_position_error(pred3d, gt3d)
+                mpjpe.append(error_j)
+                pa_mpjpe.append(pa_error_j)
+                #vertices
+                error_v, pa_error_v = cal_3d_position_error(pred3d_verts, gt3d_verts)
+                mve.append(error_v)
+                pa_mve.append(pa_error_v)
+
+
+            #counting
+            step += 1
+            total_fp += falsePositive_count
+
+            img_idx = step + accelerator.process_index*len(eval_dataloader)*bs
+            
+            if vis and (img_idx%vis_step == 0) and len(matched_verts_idx) > 0:
+                img_name = targets[idx]['img_path'].split('/')[-1].split('.')[0]
+                ori_img = tensor_to_BGR(unNormalize(samples[idx]).cpu())
+                ori_img = pad_img(ori_img, model.input_size)
+                
+                selected_verts = pred_verts[matched_verts_idx]
+                colors = get_colors_rgb(len(selected_verts))
+                mesh_img = vis_meshes_img(img = ori_img.copy(),
+                                          verts = selected_verts,
+                                          smpl_faces = smpl_layer.faces,
+                                          colors = colors,
+                                          cam_intrinsics = outputs['pred_intrinsics'][idx].detach().cpu())
+
+                full_img = np.hstack([ori_img, mesh_img])
+                cv2.imwrite(os.path.join(imgs_save_dir, f'{img_idx}_{img_name}.png'), full_img)
+                
+        progress_bar.update(1)
+
+    if distributed:
+        mve = accelerator.gather_for_metrics(mve)
+        mpjpe = accelerator.gather_for_metrics(mpjpe)
+        pa_mpjpe = accelerator.gather_for_metrics(pa_mpjpe)
+        pa_mve = accelerator.gather_for_metrics(pa_mve)
+
+        total_miss_count = sum(accelerator.gather_for_metrics([total_miss_count]))
+        total_count = sum(accelerator.gather_for_metrics([total_count]))
+        total_fp = sum(accelerator.gather_for_metrics([total_fp]))
+
+    if len(mpjpe) <= num_processes:
+        return "Failed to evaluate. Keep training!"
+    
+    precision, recall, f1 = compute_prf1(total_count,total_miss_count,total_fp)
+    error_dict = {}
+    error_dict['recall'] = recall
+
+    error_dict['MPJPE'] = round(float(sum(mpjpe)/(len(mpjpe)-num_processes)), 1)
+    error_dict['PA-MPJPE'] = round(float(sum(pa_mpjpe)/(len(pa_mpjpe)-num_processes)), 1)
+    error_dict['MVE'] = round(float(sum(mve)/(len(mve)-num_processes)), 1)
+    error_dict['PA-MVE'] = round(float(sum(pa_mve)/(len(pa_mve)-num_processes)), 1)
+
+    if accelerator.is_main_process:
+        with open(os.path.join(results_save_path,'results.txt'),'w') as f:
+            for k,v in error_dict.items():
+                f.write(f'{k}: {v}\n')
+
+    return error_dict
+
+
+
 

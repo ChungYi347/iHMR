@@ -31,7 +31,6 @@ if __name__ == '__main__':
 
 
     if args.mode.lower() == 'train':
-        raise NotImplementedError
         from accelerate.utils import set_seed
         seed = args.seed
         set_seed(args.seed)
@@ -39,7 +38,6 @@ if __name__ == '__main__':
         engine.train()
 
     elif args.mode.lower() == 'eval':
-        raise NotImplementedError
         engine = Engine(args, mode='eval')
         engine.eval()
 
