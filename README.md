@@ -93,11 +93,11 @@ Now the `weights` directory structure should be like this.
 ${Project}
 |-- weights
     |-- dinov2
-    |   `-- dinov2_vitb14_pretrain.pth
+        `-- dinov2_vitb14_pretrain.pth
     |-- sat_hmr
         |-- sat_644_3dpw.pth
         |-- sat_644_agora.pth
-    |   `-- sat_644.pth
+        `-- sat_644.pth
     `-- smpl_data
         `-- smpl
             |-- body_verts_smpl.npy
@@ -153,7 +153,7 @@ Then run:
 accelerate launch main.py --mode infer --cfg demo
 ```
 
-## Training and Evaluation
+## Training
 
 <h4> Training with Multiple GPUs</h4>
 
@@ -181,6 +181,8 @@ You can monitor the training progress using TensorBoard. To start TensorBoard, r
 tensorboard --logdir=${Project}/outputs/logs
 ```
 
+## Evaluation
+
 <h4> Evaluation with 1 GPU</h4>
 
 We provide code for evaluating on AGORA, BEDLAM and 3DPW. Evaluation results will be saved in `${Project}/results/${cfg_name}/evaluation`.
@@ -197,7 +199,8 @@ python main.py --mode eval --cfg eval_3dpw
 
 # Evaluate on AGORA-test
 # AGORA-test: F1: 0.95  MPJPE: 67.9  MVE: 63.3
-# This will generate a zip file in `${Project}/results/test_agora/evaluation/agora_test/thresh_0.5` which can be submitted to [AGORA Leaderboard](https://agora-evaluation.is.tuebingen.mpg.de/)
+# This will generate a zip file in `${Project}/results/test_agora/evaluation/agora_test/thresh_0.5`
+# which can be submitted to [AGORA Leaderboard](https://agora-evaluation.is.tuebingen.mpg.de/)
 python main.py --mode eval --cfg test_agora
 ```
 
