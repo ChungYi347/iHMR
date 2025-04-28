@@ -1,5 +1,5 @@
 
-<h1 align="center">SAT-HMR: Real-Time Multi-Person 3D Mesh Estimation via Scale-Adaptive Tokens</h1>
+<h1 align="center">SAT-HMR: Real-Time Multi-Person 3D Mesh Estimation via Scale-Adaptive Tokens <br> (CVPR 2025)</h1>
 
 <h4 align="center" style="text-decoration: none;">
   <a href="https://github.com/ChiSu001/", target="_blank"><b>Chi Su</b></a>
@@ -37,6 +37,8 @@
 </p> -->
 
 ## News :triangular_flag_on_post:
+
+[2025/02/27] SAT-HMR has been accepted to CVPR 2025!
 
 [2025/02/18] Training/evaluation code and data preparation released!
 
