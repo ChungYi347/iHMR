@@ -16,7 +16,7 @@
   <a href="https://pytorch.org/get-started/locally/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white"></a> 
   <a href="https://arxiv.org/abs/2411.19824"><img alt="arXiv" src="https://img.shields.io/badge/arXiv-2411.19824-b31b1b.svg"></a> 
   <a href="https://ChiSu001.github.io/SAT-HMR"><img alt="Project" src="https://img.shields.io/badge/-Project%20Page-lightgrey?logo=Google%20Chrome&color=informational&logoColor=white"></a> 
-  <a href="https://youtu.be/tqURcr_nCQY"><img alt="Video" src="https://img.shields.io/badge/-Video-ea3323?logo=youtube"></a> 
+  <a href="https://youtu.be/wLfNrDYFAns"><img alt="Video" src="https://img.shields.io/badge/-Video-ea3323?logo=youtube"></a> 
   <a href="https://huggingface.co/ChiSu001/SAT-HMR"><img alt="Hugging Face Models" src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Models-ffab41"></a> 
 </div>
 
