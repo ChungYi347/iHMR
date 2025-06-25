@@ -13,7 +13,8 @@
 </h4>
 
 <div align="center">
-  <a href="https://pytorch.org/get-started/locally/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white"></a> 
+  <a href="https://pytorch.org/get-started/locally/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white"></a>
+  <a href="https://openaccess.thecvf.com/content/CVPR2025/html/Su_SAT-HMR_Real-Time_Multi-Person_3D_Mesh_Estimation_via_Scale-Adaptive_Tokens_CVPR_2025_paper.html"><img alt="CVPR 2025 Paper" src="https://img.shields.io/badge/CVPR-2025-00369f?logo=OpenAccess&logoColor=white"></a>
   <a href="https://arxiv.org/abs/2411.19824"><img alt="arXiv" src="https://img.shields.io/badge/arXiv-2411.19824-b31b1b.svg"></a> 
   <a href="https://ChiSu001.github.io/SAT-HMR"><img alt="Project" src="https://img.shields.io/badge/-Project%20Page-lightgrey?logo=Google%20Chrome&color=informational&logoColor=white"></a> 
   <a href="https://youtu.be/wLfNrDYFAns"><img alt="Video" src="https://img.shields.io/badge/-Video-ea3323?logo=youtube"></a> 
@@ -221,12 +222,14 @@ accelerate launch main.py --mode eval --cfg ${cfg_name}
 
 If you find this code useful for your research, please consider citing our paper:
 ```bibtex
-@article{su2024sathmr,
-      title={SAT-HMR: Real-Time Multi-Person 3D Mesh Estimation via Scale-Adaptive Tokens},
-      author={Su, Chi and Ma, Xiaoxuan and Su, Jiajun and Wang, Yizhou},
-      journal={arXiv preprint arXiv:2411.19824},
-      year={2024}
-    }
+@InProceedings{Su_2025_CVPR,
+    author    = {Su, Chi and Ma, Xiaoxuan and Su, Jiajun and Wang, Yizhou},
+    title     = {SAT-HMR: Real-Time Multi-Person 3D Mesh Estimation via Scale-Adaptive Tokens},
+    booktitle = {Proceedings of the Computer Vision and Pattern Recognition Conference (CVPR)},
+    month     = {June},
+    year      = {2025},
+    pages     = {16796-16806}
+}
 ```
 
 ## Acknowledgement
