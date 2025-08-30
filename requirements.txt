@@ -1,4 +1,4 @@
-accelerate==0.26.1
+accelerate==1.10.0
 chumpy
 smplx
 opencv-python

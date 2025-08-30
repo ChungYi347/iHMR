@@ -128,18 +128,18 @@ class SetCriterion(nn.Module):
             # Root aligned
             src = src - src[...,[0],:].clone()
             target = target - target[...,[0],:].clone()
-            # Use 54 smpl joints
-            src = src[:,:54,:]
-            target = target[:,:54,:]
+            # Use 45 smpl joints
+            src = src[:,:45,:]
+            target = target[:,:45,:]
         elif loss == 'j2ds':
             src = src / self.j2ds_norm_scale
             target = target / self.j2ds_norm_scale
             # Need to exclude invalid kpts in 2d datasets
             loss_mask = torch.cat([t['j2ds_mask'][i] for t, (_, i) in zip(targets, indices) if 'j2ds' in t], dim=0)
-            # Use 54 smpl joints
-            src = src[:,:54,:]
-            target = target[:,:54,:]
-            loss_mask = loss_mask[:,:54,:]
+            # Use 45 smpl joints
+            src = src[:,:45,:]
+            target = target[:,:45,:]
+            loss_mask = loss_mask[:,:45,:]
         
         valid_loss = torch.abs(src-target)
 
@@ -209,7 +209,7 @@ class SetCriterion(nn.Module):
 
         return losses
 
-    def loss_absolute_depths(self, loss, outputs, targets, indices, num_instances, **kwargs):
+    def loss_normalized_depths(self, loss, outputs, targets, indices, num_instances, **kwargs):
         assert loss == 'depths' 
         losses = {}
         idx = self._get_src_permutation_idx(indices)
@@ -253,7 +253,7 @@ class SetCriterion(nn.Module):
             'betas': self.loss_L1,
             'j3ds': self.loss_L1,
             'j2ds': self.loss_L1,
-            'depths': self.loss_absolute_depths,
+            'depths': self.loss_normalized_depths,
             'scale_map': self.loss_scale_map,       
         }
         # assert loss in loss_map, f'do you really want to compute {loss} loss?'

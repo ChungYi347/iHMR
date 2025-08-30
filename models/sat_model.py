@@ -434,8 +434,8 @@ class Model(nn.Module):
                 lvl_bids = lvl1_bids
                 pad_vals = torch.full((3,), -1, dtype=lvl_zorders.dtype, device=lvl_zorders.device)
                 for lvl in range(self.sat_cfg['num_lvls']-2):
-                    if to_next_lvl.sum() == 0:
-                        break
+                    # if to_next_lvl.sum() == 0:
+                    #     break
                     next_tokens = self.lvl_pooling(token_lvls[-1][to_next_lvl])
                     # next_tokens = torch.max(token_lvls[-1][to_next_lvl].view(-1,4,C), dim=1)[0]
                     next_pos_y = pos_y_lvls[-1][to_next_lvl][::4]>>1

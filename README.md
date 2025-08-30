@@ -207,9 +207,11 @@ python main.py --mode eval --cfg eval_3dpw
 python main.py --mode eval --cfg test_agora
 ```
 
-<h4> Evaluation with Multiple GPUs</h4>
+<h4> Evaluation with Multiple GPUs (faster)</h4>
 
-We recommend using a single GPU for evaluation as it provides more accurate results. However, we also provide code for distributed evaluation to obtain results faster.
+~~We recommend using a single GPU for evaluation as it provides more accurate results. However, we also provide code for distributed evaluation to obtain results faster.~~
+
+[2025/08/30] **Note**: Distributed evaluation can provide accurate results now!!!
 
 ```bash
 # Multi-GPU configuration

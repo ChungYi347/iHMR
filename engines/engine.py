@@ -1,3 +1,5 @@
+import accelerate
+from packaging import version
 from accelerate import Accelerator
 from tqdm.auto import tqdm
 import torch
@@ -18,6 +20,8 @@ from utils.misc import get_world_size
 import torch.multiprocessing
 import numpy as np
 
+assert version.parse(accelerate.__version__) >= version.parse("1.10.0"),\
+      "Please use accelerate >= 1.10.0 to support our updated implementation of distributed evaluation (August 30, 2025)."
 
 class Engine():
     def __init__(self, args, mode='train'): 
@@ -281,7 +285,7 @@ class Engine():
             img_cnt = len(eval_dataloader) * self.eval_batch_size
             if self.distributed_eval:
                 img_cnt *= self.accelerator.num_processes
-            self.accelerator.print(f'Evaluate on {key}: {img_cnt} images')
+            self.accelerator.print(f'Evaluate on {key}: (about) {img_cnt} images')
             self.accelerator.print('Using following threshold(s): ', self.conf_thresh)
             conf_thresh = self.conf_thresh  # if 'agora' in key or 'bedlam' in key else [0.2]
             for thresh in conf_thresh:
