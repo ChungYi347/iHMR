@@ -19,7 +19,6 @@ from utils import misc
 from utils.misc import get_world_size
 import torch.multiprocessing
 import numpy as np
-from .utils import load_state_dict_safely
 from utils.transforms import unNormalize
 from utils.visualization import tensor_to_BGR, pad_img
 from utils.process_batch import prepare_batch

@@ -44,8 +44,8 @@ aug_cfg:
 # train_datasets_split: ['train','train_6fps','train','train','train','train']  # ['train','train_6fps','validation_6fps']
 # train_datasets_used: ['agora','coco','3dpw']      # ['agora','bedlam','bedlam']
 # train_datasets_split: ['train','train','train']  # ['train','train_6fps','validation_6fps']
-train_datasets_used: ['3dpw']      # ['agora','bedlam','bedlam']
-train_datasets_split: ['train']  # ['train','train_6fps','validation_6fps']
+train_datasets_used: ['3dpw', 'agora','bedlam']      # ['agora','bedlam','bedlam']
+train_datasets_split: ['train', 'train','train_6fps']  # ['train','train_6fps','validation_6fps']
 # train_datasets_used: ['agora']      # ['agora','bedlam','bedlam']
 # train_datasets_split: ['train']  # ['train','train_6fps','validation_6fps']
 # train_batch_size: 6
