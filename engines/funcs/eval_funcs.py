@@ -14,7 +14,13 @@ import scipy.io as sio
 import cv2
 import zipfile
 import pickle
+from models.human_models import SMPL_Layer
+from configs.paths import smpl_model_path
+from utils.process_batch import prepare_batch
 
+import sys
+sys.path.append(os.path.join(os.path.abspath(os.getcwd()), "ONNX-YOLOv8-Object-Detection"))
+from yolov8 import YOLOv8
 
 # Modified from agora_evaluation
 def evaluate_agora(model, eval_dataloader, conf_thresh,
@@ -410,15 +416,53 @@ def evaluate_3dpw(model, eval_dataloader, conf_thresh,
     # store arrays per sample then concatenate once at the end
     mve, mpjpe, pa_mpjpe, pa_mve = [], [], [], []
     cur_device = next(model.parameters()).device
-    smpl_layer = model.human_model
+    if hasattr(model, 'human_model'):
+        smpl_layer = model.human_model
+    else:
+        smpl_layer = SMPL_Layer(model_path = smpl_model_path, with_genders = False)
     smpl2h36m_regressor = torch.from_numpy(smpl_layer.smpl2h36m_regressor).float().to(cur_device)
+    
+    etector = YOLOv8('weights/yolov8m.onnx', conf_thres=0.1, iou_thres=0.5)
     
     progress_bar = tqdm(total=len(eval_dataloader), disable=not accelerator.is_local_main_process)
     progress_bar.set_description('evaluate')
     for itr, (samples, targets) in enumerate(eval_dataloader):
-        samples=[sample.to(device = cur_device, non_blocking = True) for sample in samples]
-        with torch.no_grad():
-           outputs = model(samples, targets)
+        if model.__class__.__name__ == "PHMR":
+            inputs = []
+            for n, target in enumerate(targets):
+                img = tensor_to_BGR(unNormalize(samples[n].cpu()))[:,:,::-1]
+
+                # detected = detector(img)
+                # boxes = detected[0][detected[2] == 0]
+
+                boxes = box_cxcywh_to_xyxy(target['boxes']).cpu()
+                boxes[:, 0] = boxes[:, 0] * model.input_size
+                boxes[:, 1] = boxes[:, 1] * model.input_size
+                boxes[:, 2] = boxes[:, 2] * model.input_size 
+                boxes[:, 3] = boxes[:, 3] * model.input_size 
+                # img = np.ascontiguousarray(img)
+                # for box in boxes.cpu().numpy():
+                # # for box in boxes:
+                #     box = box.astype(np.int32)
+                #     x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
+                #     cv2.rectangle(img, (x1, y1), (x2, y2), (255,0,255), 3)
+                # # boxes = torch.tensor(boxes)
+                # cv2.imwrite('test3.jpg', img)
+                
+                _input = {'image_cv': img, 'boxes': boxes, 'text': None, 'masks': None}
+                inputs.append(_input)
+            # inputs = [{'image_cv': img, 'boxes': boxes, 'text': None, 'masks': None}]
+
+            batch = prepare_batch(inputs, img_size=896, interaction=False)
+
+            # samples=[sample.to(device = cur_device, non_blocking = True) for sample in samples]
+            with torch.no_grad():    
+                # outputs = model(samples, targets)
+                outputs = model(batch, targets)
+        else:
+            samples=[sample.to(device = cur_device, non_blocking = True) for sample in samples]
+            with torch.no_grad():    
+                outputs = model(samples, targets)
 
         # per-batch aggregators
         batch_count = []
@@ -450,14 +494,31 @@ def evaluate_3dpw(model, eval_dataloader, conf_thresh,
             gt_j2ds = targets[idx]['j2ds'].cpu().numpy()[:,:24,:]
 
             # pred
-            select_queries_idx = torch.where(outputs['pred_confs'][idx] > conf_thresh)[0]
-            pred_verts = outputs['pred_verts'][idx][select_queries_idx].detach()
-            pred_transl = outputs['pred_transl'][idx][select_queries_idx].detach()
-            pred_j3ds = torch.einsum('bik,ji->bjk', [pred_verts - pred_transl[:,None,:], smpl2h36m_regressor]) + pred_transl[:,None,:]
-            
-            pred_verts = pred_verts.cpu().numpy()
-            pred_j3ds = pred_j3ds.cpu().numpy()
-            pred_j2ds = outputs['pred_j2ds'][idx][select_queries_idx].detach().cpu().numpy()[:,:24,:]
+            if model.__class__.__name__ == "PHMR":
+                pred_verts = outputs[idx]['smpl_vertices'].detach()
+                pred_transl = outputs[idx]['transl'].detach()
+                pred_j3ds = torch.einsum('bik,ji->bjk', [pred_verts - pred_transl[:,None,:], smpl2h36m_regressor]) + pred_transl[:,None,:]
+
+                pred_verts = pred_verts.cpu().numpy()
+                pred_j3ds = pred_j3ds.cpu().numpy()
+                pred_j2ds = outputs[idx]['j2ds'].detach().cpu().numpy()[:,:24,:]
+            elif model.__class__.__name__ == "Sam2Model":
+                pred_verts = outputs['pred_verts'][idx].detach()
+                pred_transl = outputs['pred_transl'][idx].detach()
+                pred_j3ds = torch.einsum('bik,ji->bjk', [pred_verts - pred_transl, smpl2h36m_regressor]) + pred_transl
+
+                pred_verts = pred_verts.cpu().numpy()
+                pred_j3ds = pred_j3ds.cpu().numpy()
+                pred_j2ds = outputs['pred_j2ds'][idx].detach().cpu().numpy()[:,:24,:]
+            else:
+                select_queries_idx = torch.where(outputs['pred_confs'][idx] > conf_thresh)[0]
+                pred_verts = outputs['pred_verts'][idx][select_queries_idx].detach()
+                pred_transl = outputs['pred_transl'][idx][select_queries_idx].detach()
+                pred_j3ds = torch.einsum('bik,ji->bjk', [pred_verts - pred_transl[:,None,:], smpl2h36m_regressor]) + pred_transl[:,None,:]
+                
+                pred_verts = pred_verts.cpu().numpy()
+                pred_j3ds = pred_j3ds.cpu().numpy()
+                pred_j2ds = outputs['pred_j2ds'][idx][select_queries_idx].detach().cpu().numpy()[:,:24,:]
 
             # matching
             matched_verts_idx = []
@@ -465,30 +526,41 @@ def evaluate_3dpw(model, eval_dataloader, conf_thresh,
             greedy_match = match_2d_greedy(pred_j2ds, gt_j2ds)  # tuples are (idx_pred_kps, idx_gt_kps)
             matchDict, falsePositive_count = get_matching_dict(greedy_match)
 
-            # align with matching result
-            gt_verts_list, pred_verts_list, gt_joints_list, pred_joints_list = [], [], [], []
-            gtIdxs = np.arange(len(gt_j3ds))
-            miss_flag = []
-            for gtIdx in gtIdxs:
-                gt_verts_list.append(gt_verts[gtIdx])
-                gt_joints_list.append(gt_j3ds[gtIdx])
-                if matchDict[str(gtIdx)] == 'miss' or matchDict[str(gtIdx)] == 'invalid':
-                    miss_flag.append(1)
-                    pred_verts_list.append([])
-                    pred_joints_list.append([])
-                else:
-                    miss_flag.append(0)
-                    pred_joints_list.append(pred_j3ds[matchDict[str(gtIdx)]])
-                    pred_verts_list.append(pred_verts[matchDict[str(gtIdx)]])
-                    matched_verts_idx.append(matchDict[str(gtIdx)])
+            if model.__class__.__name__ == "PHMR" or model.__class__.__name__ == "Sam2Model":
+                gt_verts_list, pred_verts_list, gt_joints_list, pred_joints_list = [], [], [], []
+                gtIdxs = np.arange(len(gt_j3ds))
+                for gtIdx in gtIdxs:
+                    gt_verts_list.append(gt_verts[gtIdx])
+                    gt_joints_list.append(gt_j3ds[gtIdx])
+                    pred_joints_list.append(pred_j3ds[gtIdx])
+                    pred_verts_list.append(pred_verts[gtIdx])
+                    matched_verts_idx.append(gtIdx)
+            else:
+                # align with matching result
+                gt_verts_list, pred_verts_list, gt_joints_list, pred_joints_list = [], [], [], []
+                gtIdxs = np.arange(len(gt_j3ds))
+                miss_flag = []
+                for gtIdx in gtIdxs:
+                    gt_verts_list.append(gt_verts[gtIdx])
+                    gt_joints_list.append(gt_j3ds[gtIdx])
+                    if matchDict[str(gtIdx)] == 'miss' or matchDict[str(gtIdx)] == 'invalid':
+                        miss_flag.append(1)
+                        pred_verts_list.append([])
+                        pred_joints_list.append([])
+                    else:
+                        miss_flag.append(0)
+                        pred_joints_list.append(pred_j3ds[matchDict[str(gtIdx)]])
+                        pred_verts_list.append(pred_verts[matchDict[str(gtIdx)]])
+                        matched_verts_idx.append(matchDict[str(gtIdx)])
 
             # compute 3D errors
             for i, (gt3d, pred) in enumerate(zip(gt_joints_list, pred_joints_list)):
                 batch_count[-1] += 1
 
-                if miss_flag[i] == 1:
-                    batch_miss_count[-1] += 1
-                    continue
+                if model.__class__.__name__ != "PHMR" and model.__class__.__name__ != "Sam2Model":
+                    if miss_flag[i] == 1:
+                        batch_miss_count[-1] += 1
+                        continue
 
                 gt3d = gt3d.reshape(-1, 3)
                 pred3d = pred.reshape(-1, 3)
@@ -505,6 +577,7 @@ def evaluate_3dpw(model, eval_dataloader, conf_thresh,
                 pred3d_verts = (pred3d_verts - pred_pelvis).copy()
 
                 # joints
+                # reconstruction_error
                 error_j, pa_error_j = cal_3d_position_error(pred3d, gt3d)
                 sample_mpjpe.append(float(error_j))
                 sample_pa_mpjpe.append(float(pa_error_j))
@@ -529,14 +602,43 @@ def evaluate_3dpw(model, eval_dataloader, conf_thresh,
                 ori_img = tensor_to_BGR(unNormalize(samples[idx]).cpu())
                 ori_img = pad_img(ori_img, model.input_size)
 
+                print(sample_mve, sample_pa_mve, sample_mpjpe, sample_pa_mpjpe)
+
                 selected_verts = pred_verts[matched_verts_idx]
                 colors = get_colors_rgb(len(selected_verts))
-                mesh_img = vis_meshes_img(img = ori_img.copy(),
-                                          verts = selected_verts,
-                                          smpl_faces = smpl_layer.faces,
-                                          colors = colors,
-                                          cam_intrinsics = outputs['pred_intrinsics'][idx].detach().cpu())
-                full_img = np.hstack([ori_img, mesh_img])
+                if model.__class__.__name__ == "PHMR":
+                    mesh_img = vis_meshes_img(img = ori_img.copy(),
+                                                verts = selected_verts,
+                                                smpl_faces = smpl_layer.faces,
+                                                colors = colors,
+                                                cam_intrinsics = outputs[idx]['cam_int_original'][matched_verts_idx].detach().cpu())
+                    full_img = np.hstack([ori_img, mesh_img])
+                elif model.__class__.__name__ == "Sam2Model":
+                    mesh_img = vis_meshes_img(img = ori_img.copy(),
+                                                verts = selected_verts,
+                                                smpl_faces = smpl_layer.faces,
+                                                colors = colors,
+                                                cam_intrinsics = outputs['pred_intrinsics'][idx].detach().cpu())
+                    full_img = np.hstack([ori_img, mesh_img])
+
+                    img = np.ascontiguousarray(ori_img)
+                    for j, (x, y) in enumerate(outputs['pred_j2ds'][0][0].detach().cpu().numpy()):
+                        cv2.circle(img, (int(round(x)), int(round(y))), 3, (0,255,0), -1, cv2.LINE_AA)
+                        cv2.putText(img, str(j), (int(x)+4, int(y)-4), cv2.FONT_HERSHEY_SIMPLEX,
+                                    1, (0,255,255), 1, cv2.LINE_AA)
+
+                    for j, (x, y) in enumerate(targets[0]['j2ds'][0].cpu().numpy()):
+                        cv2.circle(img, (int(round(x)), int(round(y))), 3, (255,0,0), -1, cv2.LINE_AA)
+                        cv2.putText(img, str(j), (int(x)+4, int(y)-4), cv2.FONT_HERSHEY_SIMPLEX,
+                                    1, (255,0,0), 1, cv2.LINE_AA)
+                    cv2.imwrite("kp2d_test_eval.jpg", img)
+                else:
+                    mesh_img = vis_meshes_img(img = ori_img.copy(),
+                                            verts = selected_verts,
+                                            smpl_faces = smpl_layer.faces,
+                                            colors = colors,
+                                            cam_intrinsics = outputs['pred_intrinsics'][idx].detach().cpu())
+                    full_img = np.hstack([ori_img, mesh_img])
                 cv2.imwrite(os.path.join(imgs_save_dir, f'{img_idx}_{img_name}.png'), full_img)
 
         # distributed gather at batch level
@@ -584,7 +686,3 @@ def evaluate_3dpw(model, eval_dataloader, conf_thresh,
                 f.write(f'{k}: {v}\n')
 
     return error_dict
-
-
-
-

@@ -11,3 +11,6 @@ termcolor
 transformers
 matplotlib
 scikit-learn
+hydra-core
+einops
+iopath

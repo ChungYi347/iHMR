@@ -385,7 +385,7 @@ class DinoVisionTransformer(nn.Module):
             out = self.norm(out)
         return x, out
 
-    def forward_specific_layers_list(self, x_list, start=0, end=None, norm=True, get_feature=True):
+    def forward_specific_layers_list(self, x_list, masks_list=None, start=0, end=None, norm=True, get_feature=True):
         assert not self.chunked_blocks
         if end is None:
             end = len(self.blocks)
@@ -400,7 +400,7 @@ class DinoVisionTransformer(nn.Module):
         else:
             return x_list
 
-    def forward_additional_layers_list(self, x_list, start=0, end=None, norm=True, get_feature=True):
+    def forward_additional_layers_list(self, x_list, masks_list=None, start=0, end=None, norm=True, get_feature=True):
         assert not self.chunked_blocks
         if end is None:
             end = len(self.additional_blocks)

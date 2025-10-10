@@ -95,7 +95,10 @@ class Model(nn.Module):
         self.encoder = encoder
         
         self.patch_size = encoder.patch_size
-        assert self.patch_size == 14
+        if self.encoder.__class__.__name__ == "DinoV3VisionTransformer":
+            assert self.patch_size == 16
+        else:
+            assert self.patch_size == 14
         
         self.use_sat = sat_cfg['use_sat']
         self.sat_cfg = sat_cfg
@@ -231,11 +234,11 @@ class Model(nn.Module):
         C = tokens.shape[-1]
         return torch.max(tokens.view(-1, 4, C), dim=1)[0]
                 
-    def get_scale_map(self, x_list):
+    def get_scale_map(self, x_list, masks=None):
         if self.sat_cfg['use_additional_blocks']:
-            x_list = self.encoder.forward_additional_layers_list(x_list, end=self.sat_cfg['get_map_layer'], get_feature=False)
+            x_list = self.encoder.forward_additional_layers_list(x_list, masks_list=masks, end=self.sat_cfg['get_map_layer'], get_feature=False)
         else:
-            x_list = self.encoder.forward_specific_layers_list(x_list, end=self.sat_cfg['get_map_layer'], get_feature=False)
+            x_list = self.encoder.forward_specific_layers_list(x_list, masks_list=masks, end=self.sat_cfg['get_map_layer'], get_feature=False)
         
         cr_token_list = [x[:, :1 + self.encoder.num_register_tokens, :].squeeze(0) for x in x_list]
         x_tokens = torch.cat([x[:, 1 + self.encoder.num_register_tokens:, :].squeeze(0) for x in x_list], dim=0)
@@ -247,7 +250,7 @@ class Model(nn.Module):
         mask[torch.any(mask, dim=1)] = True
         return mask.flatten()
 
-    def forward_encoder(self, samples, targets, use_gt = False):
+    def forward_encoder(self, samples, targets, masks=None, use_gt = False):
         B = len(samples)
         C = self.encoder.embed_dim
         cr_token_list = [self.encoder_cr_token]*len(samples)
@@ -306,24 +309,21 @@ class Model(nn.Module):
                 lvl1_pos_x.append(pos_x)
                 lvl1_bids.append(torch.full_like(pos_y, i, dtype=torch.int64))
             
-
-            
             lvl1_img_patches_28 = torch.cat(lvl1_img_patches_28, dim=0)
             lvl1_zorders = torch.cat(lvl1_zorders, dim=0)
             lvl1_pos_y = torch.cat(lvl1_pos_y, dim=0)
             lvl1_pos_x = torch.cat(lvl1_pos_x, dim=0)
             lvl1_bids = torch.cat(lvl1_bids, dim=0)
 
-            
-
             # (L1, 3, 28, 28)
             assert len(lvl1_img_patches_28) == sum(lvl1_token_lens)
-            lvl1_img_patches = F.interpolate(lvl1_img_patches_28, size = (14,14), mode='bilinear', align_corners=False)
+            if self.encoder.__class__.__name__ == "DinoV3VisionTransformer":
+                lvl1_img_patches = F.interpolate(lvl1_img_patches_28, size = (16,16), mode='bilinear', align_corners=False)
+            else:
+                lvl1_img_patches = F.interpolate(lvl1_img_patches_28, size = (14,14), mode='bilinear', align_corners=False)
             # (L1, 3, 14, 14)
             lvl1_tokens = self.encoder_patch_norm[1](self.encoder_patch_proj[1](lvl1_img_patches).flatten(1))
             # (L1, C)
-            
-            
             
             assert len(lvl1_pos_y) == len(lvl1_tokens)
             full_pos_embed = self.preprocessed_pos_lvl1 if not self.training\
@@ -339,7 +339,7 @@ class Model(nn.Module):
             x_list = [torch.cat([cr, lvl1],dim=0).unsqueeze(0)\
                                  for (cr, lvl1) \
                                  in zip(cr_token_list, lvl1_tokens.split(lvl1_token_lens))]
-            scale_map, updated_cr_list, updated_lvl1 = self.get_scale_map(x_list)
+            scale_map, updated_cr_list, updated_lvl1 = self.get_scale_map(x_list, masks)
             # for visualization
             scale_map_dict = {'scale_map': scale_map, 'lens': lvl1_token_lens, 'hw': lvl1_feature_hw,
                               'pos_y': lvl1_pos_y, 'pos_x': lvl1_pos_x}
@@ -379,7 +379,7 @@ class Model(nn.Module):
             x_list = [torch.cat([cr, lvl0],dim=0).unsqueeze(0)\
                             for (cr, lvl0) \
                             in zip(cr_token_list, lvl0_tokens.split(lvl0_token_lens))]
-            x_list = self.encoder.forward_specific_layers_list(x_list, end=self.sat_cfg['get_map_layer'], get_feature=False)
+            x_list = self.encoder.forward_specific_layers_list(x_list, masks_list=masks, end=self.sat_cfg['get_map_layer'], get_feature=False)
             lvl0_tokens = torch.cat([x[:, 1 + self.encoder.num_register_tokens:, :].squeeze(0) for x in x_list], dim=0)
             assert len(lvl0_pos_x) == len(lvl0_tokens)
             # also update lvl1 and crs
@@ -490,7 +490,7 @@ class Model(nn.Module):
                 
 
         start = self.sat_cfg['get_map_layer'] if self.use_sat else 0
-        _, final_feature_list = self.encoder.forward_specific_layers_list(x_list, start = start, norm=True)
+        _, final_feature_list = self.encoder.forward_specific_layers_list(x_list, masks_list=masks, start = start, norm=True)
 
         # proj
         token_lens = [feature.shape[1] for feature in final_feature_list]
@@ -542,7 +542,7 @@ class Model(nn.Module):
         return verts_cam, j3ds_cam, j2ds_img, depths, transl.flatten(2)
 
 
-    def forward(self, samples: NestedTensor, targets, sat_use_gt = False, detach_j3ds = False):
+    def forward(self, samples: NestedTensor, targets, masks=None, sat_use_gt = False, detach_j3ds = False):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -581,7 +581,7 @@ class Model(nn.Module):
 
 
         final_features, pos_embeds, token_lens, scale_map_dict, sat_dict\
-             = self.forward_encoder(samples, targets, use_gt = sat_use_gt)
+             = self.forward_encoder(samples, targets, masks=masks, use_gt = sat_use_gt)
 
         # default dab-detr pipeline
         embedweight = (self.refpoint_embed.weight).unsqueeze(0).repeat(bs,1,1)
@@ -632,6 +632,9 @@ class Model(nn.Module):
                 outputs_pose = rot6d_to_axis_angle(outputs_pose_6d)
 
                 outputs_conf = self.conf_head(hs[lvl]).sigmoid()
+                # # select_queries_idx = torch.where(outputs_conf[0] > 0.5)[0]
+                # outputs_pose_6d[0][select_queries_idx]
+                # import pdb; pdb.set_trace()
 
                 # cam
                 cam_xys = self.cam_head(hs[lvl])
@@ -679,7 +682,8 @@ class Model(nn.Module):
                 'pred_boxes': pred_boxes[-1], 'pred_confs': pred_confs[-1], 
                'pred_j3ds': pred_j3ds[-1], 'pred_j2ds': pred_j2ds[-1],
                'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
-               'pred_depths': pred_depths[-1], 'pred_transl': pred_transl}
+               'pred_depths': pred_depths[-1], 'pred_transl': pred_transl,
+               'img': samples}
         
         if self.aux_loss and self.training:
             out['aux_outputs'] = self._set_aux_loss(pred_poses, pred_betas,

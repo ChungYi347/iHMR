@@ -8,6 +8,124 @@ from utils.misc import (NestedTensor, nested_tensor_from_tensor_list,
 from utils import box_ops
 import torch.nn.functional as F
 
+def prepare_prompt_query_box(targets, dn_cfg, num_queries, hidden_dim, prompt_encoder, dn_prompt_enc):
+    device = targets[0]['boxes'].device
+
+    dn_number = dn_cfg['dn_number']
+    box_noise_scale = dn_cfg['box_noise_scale']
+    tgt_noise_scale = dn_cfg['tgt_noise_scale']
+
+    #  box queries
+    boxes = torch.cat([t['boxes'] for t in targets])                                # [sum_i K_i, 4] (cx,cy,w,h in [0,1])
+    known_bboxs = boxes.repeat(dn_number, 1)                                         # CHANGED: 2*dn_number -> dn_number
+    known_bbox_expand = known_bboxs.clone()
+
+    if box_noise_scale > 0:
+        known_bbox_ = torch.zeros_like(known_bboxs)
+        known_bbox_[:, :2] = known_bboxs[:, :2] - known_bboxs[:, 2:] / 2
+        known_bbox_[:, 2:] = known_bboxs[:, :2] + known_bboxs[:, 2:] / 2
+
+        diff = torch.zeros_like(known_bboxs)
+        diff[:, :2] = known_bboxs[:, 2:] / 2
+        diff[:, 2:] = known_bboxs[:, 2:] / 2
+
+        rand_sign = torch.randint_like(known_bboxs, low=0, high=2, dtype=torch.float32) * 2.0 - 1.0
+        rand_part = torch.rand_like(known_bboxs)
+        rand_part *= rand_sign
+        known_bbox_ = known_bbox_ + torch.mul(rand_part, diff).to(device=device) * box_noise_scale
+        known_bbox_ = known_bbox_.clamp(min=0.0, max=1.0)
+        known_bbox_expand[:, :2] = (known_bbox_[:, :2] + known_bbox_[:, 2:]) / 2
+        known_bbox_expand[:, 2:] = known_bbox_[:, 2:] - known_bbox_[:, :2]
+
+    eps = 1e-4
+    input_bbox_embed = inverse_sigmoid(known_bbox_expand.clamp(min=eps, max=1 - eps))
+
+    known = [(torch.ones_like(t['labels'])) for t in targets]
+    batch_size = len(known)
+    known_num = [int(sum(k)) for k in known]                                         # [K_0, K_1, ...]
+    batch_idx = torch.cat([torch.full_like(t['labels'].long(), i) for i, t in enumerate(targets)])
+    known_bid = batch_idx.repeat(dn_number, 1).view(-1).to(device=device).long()     # CHANGED: 2*dn_number -> dn_number
+
+    single_pad = int(max(known_num))                                                 # per-image max GT
+    pad_size = int(single_pad * dn_number)                                           # CHANGED: single_pad * 2 * dn_number -> single_pad * dn_number
+    padding_tgt = torch.zeros((pad_size, hidden_dim), device=device)
+    padding_bbox = torch.zeros((pad_size, 4), device=device)
+
+    _boxes = torch.cat([
+        boxes * prompt_encoder.input_image_size[0],                                  # 스케일 확인 필요 (cxcywh vs xyxy)
+        torch.ones((boxes.shape[0], 1), device=boxes.device)
+    ], dim=1)
+    prompt_emd = prompt_encoder(_boxes).view(_boxes.shape[0], -1)
+    known_params = prompt_emd.repeat(dn_number, 1)                                   # CHANGED: 2*dn_number -> dn_number
+    known_params_expaned = known_params.clone()
+    if tgt_noise_scale > 0:
+        rand_sign = torch.randint_like(known_params, low=0, high=2, dtype=torch.float32) * 2.0 - 1.0
+        rand_part = torch.rand_like(known_params)
+        rand_part *= rand_sign
+        known_params_expaned = known_params_expaned + rand_part * tgt_noise_scale
+    m = known_params_expaned.to(device=device)
+    input_tgt_embed = dn_prompt_enc(m)
+
+    input_query_tgt = padding_tgt.repeat(batch_size, 1, 1)                           # [B, pad_size, C]
+    input_query_bbox = padding_bbox.repeat(batch_size, 1, 1)                         # [B, pad_size, 4]
+
+    if len(known_num):
+        Ki = torch.tensor(known_num, device=device, dtype=torch.long)   # [B]
+        cumK = torch.cumsum(torch.cat([torch.zeros(1, device=device, dtype=torch.long), Ki[:-1]]), dim=0)  # [B]
+
+        expanded_src_idx_list_tgt  = []
+        expanded_src_idx_list_bbox = []
+        expanded_bid_list          = []
+        expanded_map_idx_list      = []
+
+        for i in range(batch_size):
+            Ki_i     = Ki[i].item()                      
+            if Ki_i == 0:
+                continue  
+            src_base = dn_number * cumK[i].item()        
+            src_idx_img = torch.arange(dn_number * Ki_i, device=device, dtype=torch.long) + src_base
+
+            for g in range(dn_number):
+                expanded_bid_list.append(torch.full((single_pad,), i, device=device, dtype=torch.long))
+                block_start = g * single_pad
+                block_idx   = torch.arange(single_pad, device=device, dtype=torch.long) + block_start
+                expanded_map_idx_list.append(block_idx)
+                src_g_start = g * Ki_i
+                take_idx    = src_g_start + (torch.arange(single_pad, device=device, dtype=torch.long) % Ki_i)
+                expanded_src_idx_list_tgt.append(src_idx_img[take_idx])
+                expanded_src_idx_list_bbox.append(src_idx_img[take_idx])
+
+        if expanded_src_idx_list_tgt:
+            expanded_src_idx_tgt  = torch.cat(expanded_src_idx_list_tgt,  dim=0)  
+            expanded_src_idx_bbox = torch.cat(expanded_src_idx_list_bbox, dim=0)
+            expanded_bid          = torch.cat(expanded_bid_list,          dim=0)
+            expanded_map_idx      = torch.cat(expanded_map_idx_list,      dim=0)
+
+            input_query_tgt[(expanded_bid, expanded_map_idx)]  = input_tgt_embed[expanded_src_idx_tgt]
+            input_query_bbox[(expanded_bid, expanded_map_idx)] = input_bbox_embed[expanded_src_idx_bbox]
+
+    # prepare attn_mask
+    tgt_size = pad_size + num_queries
+    attn_mask = torch.zeros((tgt_size, tgt_size), dtype=bool, device=device)
+
+    # match queries cannot see DN (reconstruct) tokens
+    attn_mask[pad_size:, :pad_size] = True
+
+    # reconstruct groups cannot see each other (각 그룹 내부만 False=허용)
+    for g in range(dn_number):
+        g_start = single_pad * g
+        g_end   = g_start + single_pad
+        if g_start > 0:
+            attn_mask[g_start:g_end, :g_start] = True
+        if g_end < pad_size:
+            attn_mask[g_start:g_end, g_end:pad_size] = True
+
+    dn_meta = {
+        'pad_size': pad_size,
+        'num_dn_group': dn_number,
+    }
+
+    return input_query_tgt, input_query_bbox, attn_mask, dn_meta
 
 def prepare_for_cdn(targets, dn_cfg, num_queries, hidden_dim, dn_enc):
     """
@@ -146,6 +264,7 @@ def prepare_for_cdn(targets, dn_cfg, num_queries, hidden_dim, dn_enc):
     }
 
     return input_query_tgt, input_query_bbox, attn_mask, dn_meta
+
 
 
 def dn_post_process(pred_poses, pred_betas,

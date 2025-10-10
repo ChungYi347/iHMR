@@ -18,13 +18,19 @@ from utils.constants import smpl_24_flip, smpl_root_idx
 from utils.map import gen_scale_map, build_z_map
 from configs.paths import smpl_model_path
 from models.human_models import SMPL_Layer, smpl_gendered
+# from models.smpl_family import SMPLX, SMPL
+from models.geometry import axis_angle_to_matrix
 
+# SMPLX_MODEL_DIR = 'weights/body_models/smplx'
+# SMPL_MODEL_DIR = 'weights/body_models/smpl'
+# SMPLX2SMPL = 'weights/body_models/smplx2smpl.pkl'
 
 class BASE(Dataset):
     def __init__(self, input_size = 1288, aug = True, mode = 'train', 
                         human_type = 'smpl', 
                         sat_cfg = None, 
-                        aug_cfg = None):
+                        aug_cfg = None,
+                        backbone = "vitb"):
         self.input_size = input_size
         self.aug = aug
         if mode not in ['train', 'eval', 'infer']:
@@ -38,13 +44,14 @@ class BASE(Dataset):
         self.sat_cfg = sat_cfg
 
         if self.use_sat:
-            assert input_size % 56 == 0
+            assert input_size % 56 == 0 or input_size % 64 == 0
 
         if self.mode == 'train' and aug_cfg is None:
             aug_cfg = {'rot_range': [-15, 15],
                        'scale_range': [0.8, 1.8],
                        'flip_ratio': 0.5}
         self.aug_cfg = aug_cfg
+        self.backbone = backbone
 
         if human_type == 'smpl':
             self.poses_flip = smpl_24_flip
@@ -52,6 +59,7 @@ class BASE(Dataset):
             self.num_betas = 10
             self.num_kpts = 45
             self.human_model = smpl_gendered
+        # self.smpl = SMPL(SMPL_MODEL_DIR)
 
         self.vis_thresh = 4    # least num visible kpts for a valid individual
 
@@ -63,10 +71,14 @@ class BASE(Dataset):
         self.human_keys = ['boxes', 'labels',
                            'poses', 'betas', 
                            'transl', 'verts', 
+                        #    'j3ds', 'j2ds', 'j2ds_mask', 'padd_j2ds',
                            'j3ds', 'j2ds', 'j2ds_mask',
                             'depths', 'focals', 'genders']
 
-        z_depth = math.ceil(math.log2(self.input_size//28))
+        if self.backbone == "vitb":
+            z_depth = math.ceil(math.log2(self.input_size//28))
+        else:
+            z_depth = math.ceil(math.log2(self.input_size//32))
         self.z_order_map, self.y_coords, self.x_coords = build_z_map(z_depth)
 
         
@@ -241,6 +253,13 @@ class BASE(Dataset):
             if 'genders' in meta_data:
                 smpl_kwargs.update({'genders': meta_data['genders']})
             verts, j3ds = self.human_model(**smpl_kwargs)
+            # R = roma.rotvec_to_rotmat(pose[:,0])
+            # poses = axis_angle_to_matrix(meta_data['poses'].reshape(-1, 24, 3))
+            # smpl_out = self.smpl(global_orient = poses[:, :1],
+            #                 body_pose = poses[:, 1:24],
+            #                 betas = meta_data['betas'])
+            # _verts, _j3ds = smpl_out.vertices, smpl_out.joints
+            # import pdb; pdb.set_trace()
 
         j3ds = j3ds[:, :self.num_kpts, :]
         root = j3ds[:,smpl_root_idx,:].clone() # smpl root
@@ -259,9 +278,19 @@ class BASE(Dataset):
     def project_joints(self, meta_data):
         j3ds = meta_data['j3ds']
         cam_intrinsics = meta_data['cam_intrinsics']
+        
+        # padd_cam_intrinsics = meta_data['cam_intrinsics'].clone()
+        # size = meta_data['img_size'].flip(0)
+        # scale = self.input_size / max(size)
+        # offset = (self.input_size - scale * size) / 2
+        # padd_cam_intrinsics[:,:2,-1] += offset
+
         j2ds_homo = torch.matmul(j3ds,cam_intrinsics.transpose(-1,-2))
         j2ds = j2ds_homo[...,:2]/(j2ds_homo[...,2,None])
 
+        # padd_j2ds_homo = torch.matmul(j3ds,padd_cam_intrinsics.transpose(-1,-2))
+        # padd_j2ds = padd_j2ds_homo[...,:2]/(padd_j2ds_homo[...,2,None])
+        # meta_data.update({'j3ds': j3ds, 'j2ds': j2ds, 'padd_j2ds': padd_j2ds})
         meta_data.update({'j3ds': j3ds, 'j2ds': j2ds})
 
     def check_visibility(self, meta_data):
@@ -335,7 +364,6 @@ class BASE(Dataset):
         self.get_boxes(meta_data)
         
         meta_data.update({'labels': torch.zeros(meta_data['pnum'], dtype=int)})
-        
 
         # VI. Occlusion augmentation
         if self.aug:
@@ -351,13 +379,18 @@ class BASE(Dataset):
             depths_norm = meta_data['depths'][:,1]
             cam_intrinsics = meta_data['cam_intrinsics']
             sorted_idx = torch.argsort(depths_norm, descending=True)
-            map_size = (meta_data['img_size'] + 27)//28
+            if self.backbone == "vitb":
+                patch_size = 28
+                map_size = (meta_data['img_size'] + 27)//28
+            else:
+                patch_size = 32
+                map_size = (meta_data['img_size'] + 31)//32
 
             scale_map = gen_scale_map(scales[sorted_idx], v3ds[sorted_idx],
                                         faces = self.human_model.faces, 
                                         cam_intrinsics = cam_intrinsics[sorted_idx] if len(cam_intrinsics) > 1 else cam_intrinsics, 
                                         map_size = map_size,
-                                        patch_size = 28,
+                                        patch_size = patch_size,
                                         pad = True)
             scale_map_z, _, pos_y, pos_x = to_zorder(scale_map, 
                                                 z_order_map = self.z_order_map,
@@ -376,7 +409,10 @@ class BASE(Dataset):
         raw_data = self.get_raw_data(index)
         
         # Load original image
-        ori_img = cv2.imread(raw_data['img_path'])
+        if raw_data['ds'] == 'bedlam':
+            ori_img = cv2.imread(raw_data['img_path'].replace('train', 'train_images'))
+        else:
+            ori_img = cv2.imread(raw_data['img_path'])
         if raw_data['ds'] == 'bedlam' and 'closeup' in raw_data['img_path']:
             ori_img = cv2.rotate(ori_img, cv2.ROTATE_90_CLOCKWISE)
         img_size = torch.tensor(ori_img.shape[:2])
@@ -427,19 +463,38 @@ class BASE(Dataset):
                 ])
         
 
-        patch_size = 14
-        if self.use_sat:
-            patch_size = 56
+        if self.backbone == "vitb":
+            patch_size = 14
+            if self.use_sat:
+                patch_size = 56
+        else:
+            patch_size = 16
+            if self.use_sat:
+                patch_size = 64
         # pad image to support pooling
-        pad_img = np.zeros((math.ceil(img.shape[0]/patch_size)*patch_size, math.ceil(img.shape[1]/patch_size)*patch_size, 3), dtype=img.dtype)
-        pad_img[:img.shape[0], :img.shape[1]] = img
+
+        H, W = img.shape[:2]
+        Hp = math.ceil(H / patch_size) * patch_size
+        Wp = math.ceil(W / patch_size) * patch_size
+
+        # pad_img = np.zeros((math.ceil(img.shape[0]/patch_size)*patch_size, math.ceil(img.shape[1]/patch_size)*patch_size, 3), dtype=img.dtype)
+        # pad_img[:img.shape[0], :img.shape[1]] = img
+        pad_img = np.zeros((Hp, Wp, 3), dtype=img.dtype)
+        pad_img[:H, :W] = img
         assert max(pad_img.shape[:2]) == self.input_size
         pad_img = Image.fromarray(pad_img[:,:,::-1].copy())
         norm_img = array2tensor(pad_img)
 
+        mask = torch.zeros((Hp, Wp), dtype=torch.bool)
+        if H < Hp:
+            mask[H:, :] = True
+        if W < Wp:
+            mask[:, W:] = True
+
         if 'j2ds_mask' in meta_data:
             meta_data['j2ds_mask'][:,:,:] = True
 
+        # return norm_img, meta_data, mask
         return norm_img, meta_data
 
     def visualize(self, results_save_dir = None, vis_num = 100):
@@ -469,29 +524,30 @@ class BASE(Dataset):
                                         cam_intrinsics = targets['cam_intrinsics'].cpu(),
                                         colors=colors,
                                         padding=False)
-                cv2.imwrite(os.path.join(results_save_dir,f'{idx}_{img_name}_mesh.jpg'), mesh_img)
+                cv2.imwrite(os.path.join(results_save_dir,f'ori_{idx}_{img_name}_mesh.jpg'), mesh_img)
+                print(os.path.join(results_save_dir,f'ori_{idx}_{img_name}_mesh.jpg'))
 
 
-            if 'boxes' in targets:
-                gt_img = ori_img.copy()
-                boxes = box_cxcywh_to_xyxy(targets['boxes']) * self.input_size
-                for i, bbox in enumerate(boxes):
-                    bbox = bbox.int().tolist()
-                    cv2.rectangle(gt_img, (bbox[0], bbox[1]), (bbox[2], bbox[3]),
-                                        color=(0,0,255), thickness = 2 )
+            # if 'boxes' in targets:
+            #     gt_img = ori_img.copy()
+            #     boxes = box_cxcywh_to_xyxy(targets['boxes']) * self.input_size
+            #     for i, bbox in enumerate(boxes):
+            #         bbox = bbox.int().tolist()
+            #         cv2.rectangle(gt_img, (bbox[0], bbox[1]), (bbox[2], bbox[3]),
+            #                             color=(0,0,255), thickness = 2 )
 
-                cv2.imwrite(os.path.join(results_save_dir,f'{idx}_{img_name}_boxes.jpg'), gt_img)
+            #     cv2.imwrite(os.path.join(results_save_dir,f'{idx}_{img_name}_boxes.jpg'), gt_img)
             
-            if 'scale_map' in targets:
-                gt_img = ori_img.copy()
-                flatten_map = targets['scale_map']
-                ys, xs = targets['scale_map_pos']['pos_y'], targets['scale_map_pos']['pos_x']
-                h, w = targets['scale_map_hw']
-                scale_map = torch.zeros((h,w,2))
-                scale_map[ys,xs] = flatten_map
-                img = vis_scale_img(gt_img, scale_map, patch_size=28)
+            # if 'scale_map' in targets:
+            #     gt_img = ori_img.copy()
+            #     flatten_map = targets['scale_map']
+            #     ys, xs = targets['scale_map_pos']['pos_y'], targets['scale_map_pos']['pos_x']
+            #     h, w = targets['scale_map_hw']
+            #     scale_map = torch.zeros((h,w,2))
+            #     scale_map[ys,xs] = flatten_map
+            #     img = vis_scale_img(gt_img, scale_map, patch_size=28)
 
-                cv2.imwrite(os.path.join(results_save_dir,f'{idx}_{img_name}_scales.jpg'), img)
+            #     cv2.imwrite(os.path.join(results_save_dir,f'{idx}_{img_name}_scales.jpg'), img)
 
 
             # if 'j2ds' in targets:

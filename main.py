@@ -1,9 +1,17 @@
-import argparse
 import os
+os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
+os.environ["PYTORCH_NO_DISTRIBUTED_DEBUG"] = "1"
+
+import logging
+logging.getLogger("torch").setLevel(logging.CRITICAL)
+logging.getLogger("torch.distributed").setLevel(logging.CRITICAL)
+logging.disable(logging.CRITICAL)  #
+
+
+import argparse
 import yaml
 import numpy as np
 from engines.engine import Engine
-
 
 def get_args_parser():
     parser = argparse.ArgumentParser('SAT-HMR', add_help=False)

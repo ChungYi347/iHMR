@@ -13,7 +13,7 @@ class COCO(BASE):
 
         self.ds_name = 'coco'
         self.split = split
-        self.dataset_path = os.path.join(dataset_root,'coco')
+        self.dataset_path = os.path.join(dataset_root,'coco_2017')
         self.annots_path = os.path.join(self.dataset_path,'COCO_small_NA_SMPL.npz')
         self.annots = np.load(self.annots_path, allow_pickle=True)['annots'][()]
         self.img_names = list(self.annots.keys())

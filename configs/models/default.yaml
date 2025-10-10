@@ -1,5 +1,8 @@
-input_size: 1288
+# input_size: 1288
+input_size: 896
+# input_size: 1280
 encoder: 'vitb'
+# encoder: 'dinov3_vitb'
 
 # decoder
 hidden_dim: 768
@@ -27,3 +30,25 @@ dn_cfg:
   tgt_embed_type: "params"
   box_noise_scale: 0.4
   tgt_noise_scale: 0.2
+
+LOGDIR: 'lightning_logs'
+SEED_VALUE: 0
+DEVICES: [0,1,2,3]
+
+MODEL:
+  BACKBONE: 'dinov2_vitl14'
+  IMG_SIZE: 896
+  PATCH_SIZE: 14
+  EMBED_DIM: 1024
+  MLP_DIM: 1024
+  DECODER_DEPTH: 4
+  REGRESSOR_DEPTH: 2
+  TRANSFORMER: 'cross-person'
+  PROMPT_TYPE: 'prompt'
+  TRANSL: 'root'
+  MASK_PROMPT: True
+  INVERSE_DEPTH: True
+
+EXP_NAME: 'fhmr_170'
+
+

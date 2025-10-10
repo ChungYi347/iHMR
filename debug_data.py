@@ -1,8 +1,14 @@
 from datasets.multiple_datasets import datasets_dict     
 
-ds_names = ['agora','bedlam','crowdpose','mpii','coco','3dpw','h36m']
-ds_splits =  ['train','train_6fps','train','train','train','train','train']
+# ds_names = ['agora','bedlam','crowdpose','mpii','coco','3dpw','h36m']
+# ds_splits =  ['train','train_6fps','train','train','train','train','train']
+# ds_names = ['agora','bedlam','coco','3dpw']
+# ds_splits =  ['train','train_6fps','train','train']
 
+# ds_names = ['agora','coco','3dpw']
+# ds_splits =  ['train','train','train']
+ds_names = ['3dpw']
+ds_splits =  ['train']
 # use it to visualize GTs
 if __name__ == '__main__':
     kwargs = {'input_size': 1288, 'aug': False, 'mode': 'train', 'human_type':'smpl'}
@@ -12,5 +18,5 @@ if __name__ == '__main__':
         ds = datasets_dict[name](split = split, **kwargs)
         print(f'Length of {name}_{split}: {len(ds)}')
 
-        ds.visualize(vis_num = 20)
+        ds.visualize(vis_num = 100)
     

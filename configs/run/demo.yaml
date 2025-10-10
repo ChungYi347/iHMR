@@ -1,4 +1,5 @@
 model: default
+model_type: "sat"
 
 pretrain: True
 pretrain_path: './weights/sat_hmr/sat_644.pth'

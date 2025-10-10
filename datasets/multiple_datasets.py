@@ -52,5 +52,6 @@ class MultipleDatasets(Dataset):
             else:
                 data_idx = index - self.db_len_cumsum[db_idx-1]
 
+        # norm_img, meta_data, mask = self.dbs[db_idx][data_idx]
         norm_img, meta_data = self.dbs[db_idx][data_idx]
         return norm_img, meta_data

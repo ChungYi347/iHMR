@@ -12,5 +12,7 @@
 # ------------------------------------------------------------------------
 
 from .sat_model import build_sat_model
-
-
+from .hmr_model import build_hmr_model
+from .sat_model_pr import build_sat_pr_model
+from .sat_model_pr_sam2 import build_sat_pr_sam2_model
+from .phmr_model import build_phmr_model

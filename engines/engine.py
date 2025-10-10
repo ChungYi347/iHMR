@@ -12,13 +12,18 @@ import os
 import re
 import time
 import datetime
-from models import build_sat_model
+from models import build_sat_model, build_hmr_model, build_sat_pr_model, build_sat_pr_sam2_model, build_phmr_model
 from .funcs.eval_funcs import *
 from .funcs.infer_funcs import inference
 from utils import misc
 from utils.misc import get_world_size
 import torch.multiprocessing
 import numpy as np
+from .utils import load_state_dict_safely
+from utils.transforms import unNormalize
+from utils.visualization import tensor_to_BGR, pad_img
+from utils.process_batch import prepare_batch
+from utils.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
 
 assert version.parse(accelerate.__version__) >= version.parse("1.10.0"),\
       "Please use accelerate >= 1.10.0 to support our updated implementation of distributed evaluation (August 30, 2025)."
@@ -32,7 +37,8 @@ class Engine():
         self.eval_func_maps = {'agora_validation': evaluate_agora,
                                 'bedlam_validation_6fps': evaluate_agora,
                                 'agora_test': test_agora,
-                                '3dpw_test': evaluate_3dpw,}
+                                '3dpw_test': evaluate_3dpw,
+                                '3dpw_train': evaluate_3dpw,}
         self.inference_func = inference
 
         if self.mode == 'train':
@@ -68,6 +74,8 @@ class Engine():
     def prepare_accelerator(self):
         if self.mode == 'train':
             self.accelerator = Accelerator(
+                mixed_precision="bf16",   
+                # gradient_accumulation_steps=getattr(self, "grad_accum_steps", 12),
                 log_with="tensorboard",
                 project_dir=os.path.join(self.log_dir)
             )
@@ -83,14 +91,45 @@ class Engine():
     def prepare_models(self, args):
         # load model and criterion
         self.accelerator.print('Preparing models...')
-        self.unwrapped_model, self.criterion = build_sat_model(args, set_criterion = (self.mode == 'train'))
+        # self.unwrapped_model, self.criterion = build_phmr_model(args, set_criterion = (self.mode == 'train'))
+        # self.unwrapped_model, self.criterion = build_sat_model(args, set_criterion = (self.mode == 'train'))
+        # if args.model_type == "sat":
+        #     self.unwrapped_model, self.criterion = build_sat_model(args, set_criterion = (self.mode == 'train'))
+        # elif args.model_type == "sat_pr":
+        #     self.unwrapped_model, self.criterion = build_sat_pr_model(args, set_criterion = (self.mode == 'train'))
+        # elif args.model_type == "sat_pr_sam2":
+        #     self.unwrapped_model, self.criterion = build_sat_pr_sam2_model(args, set_criterion = (self.mode == 'train'))
+        self.unwrapped_model, self.criterion = build_hmr_model(args, set_criterion = (self.mode == 'train'))
         if self.criterion is not None:
             self.weight_dict = self.criterion.weight_dict
         # load weights
         if args.pretrain:
-            self.accelerator.print(f'Loading pretrained weights: {args.pretrain_path}') 
-            state_dict = torch.load(args.pretrain_path, weights_only=False)
-            self.unwrapped_model.load_state_dict(state_dict, strict=False)
+            if args.encoder == "dinov3_vitb":
+                self.accelerator.print(f'Loading pretrained weights: {args.pretrain_path}') 
+
+                ckpt = torch.load(args.pretrain_path, map_location='cpu')
+                state_dict = ckpt['state_dict'] if 'state_dict' in ckpt else ckpt
+
+                model_dict = self.unwrapped_model.state_dict()
+
+                filtered_state_dict = {}
+                skipped = []
+
+                for k, v in state_dict.items():
+                    if k in model_dict:
+                        if v.shape == model_dict[k].shape:
+                            filtered_state_dict[k] = v
+                        else:
+                            skipped.append((k, v.shape, model_dict[k].shape))
+                    else:
+                        skipped.append((k, v.shape, None))
+
+                model_dict.update(filtered_state_dict)
+                self.unwrapped_model.load_state_dict(model_dict, strict=False)
+            else:
+                self.accelerator.print(f'Loading pretrained weights: {args.pretrain_path}') 
+                state_dict = torch.load(args.pretrain_path, weights_only=False)
+                self.unwrapped_model.load_state_dict(state_dict, strict=False)
 
         # to gpu
         self.model = self.accelerator.prepare(self.unwrapped_model)
@@ -104,7 +143,7 @@ class Engine():
             train_dataset = MultipleDatasets(args.train_datasets_used, args.train_datasets_split,
                                         make_same_len=False, input_size=args.input_size, aug=True, 
                                         mode = 'train', sat_cfg=args.sat_cfg,
-                                        aug_cfg=args.aug_cfg)
+                                        aug_cfg=args.aug_cfg, backbone=args.encoder)
             self.train_dataloader = DataLoader(dataset=train_dataset, batch_size=self.train_batch_size,
                                                 shuffle=True,collate_fn=misc.collate_fn, 
                                                 num_workers=args.train_num_workers,pin_memory=True)
@@ -118,7 +157,8 @@ class Engine():
                                                           mode = 'eval', 
                                                           input_size = args.input_size, 
                                                           aug = False,
-                                                          sat_cfg=args.sat_cfg)\
+                                                          sat_cfg=args.sat_cfg,
+                                                          backbone=args.encoder)\
                         for (ds, split) in zip(args.eval_datasets_used, args.eval_datasets_split)}
             self.eval_dataloaders = {k: DataLoader(dataset=v, batch_size=self.eval_batch_size,
                                         shuffle=False,collate_fn=misc.collate_fn, 
@@ -133,7 +173,7 @@ class Engine():
             self.accelerator.print(f'Loading inference images from {img_folder}')
             self.infer_batch_size = args.infer_batch_size
             infer_ds = COMMON(img_folder = img_folder, input_size=args.input_size,aug=False,
-                                mode = 'infer', sat_cfg=args.sat_cfg)
+                                mode = 'infer', sat_cfg=args.sat_cfg, backbone=args.encoder)
             self.infer_dataloader = DataLoader(dataset=infer_ds, batch_size=self.infer_batch_size,
                                         shuffle=False,collate_fn=misc.collate_fn, 
                                         num_workers=args.infer_num_workers,pin_memory=True)
@@ -156,20 +196,67 @@ class Engine():
         self.detach_j3ds = args.detach_j3ds
 
         self.accelerator.print('Preparing optimizer and lr_scheduler...')   
-        param_dicts = [
-            {
-                "params":
-                    [p for n, p in self.unwrapped_model.named_parameters()
-                    if not misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad],
-                "lr": args.lr,
-            },
-            {
-                "params": 
-                    [p for n, p in self.unwrapped_model.named_parameters() 
-                    if misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad],
-                "lr": args.lr_encoder,
-            }
-        ]
+        if hasattr(args, "lr_encoder_names"):
+            if hasattr(args, 'model_type') and args.model_type == "sat_pr":
+                param_dicts = [
+                    {
+                        "params":
+                            [p for n, p in self.unwrapped_model.named_parameters()
+                            if not misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, ["prompt"])],
+                        "lr": args.lr,
+                    },
+                    {
+                        "params": 
+                            [p for n, p in self.unwrapped_model.named_parameters() 
+                            if misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, ["prompt"])],
+                        "lr": args.lr_encoder,
+                    },
+                    {
+                        "params": 
+                            [p for n, p in self.unwrapped_model.named_parameters() 
+                            if misc.match_name_keywords(n, ["prompt"]) and p.requires_grad],
+                        "lr": args.lr_propmt,
+                    }
+                ]
+            elif hasattr(args, 'model_type') and args.model_type == "sat_pr_sam2":
+                param_dicts = [
+                    {
+                        "params":
+                            [p for n, p in self.unwrapped_model.named_parameters()
+                            if not misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, ["prompt"])],
+                        "lr": args.lr,
+                    },
+                    {
+                        "params": 
+                            [p for n, p in self.unwrapped_model.named_parameters() 
+                            if misc.match_name_keywords(n, ["prompt"]) and p.requires_grad],
+                        "lr": args.lr_propmt,
+                    }
+                ]
+            else:
+                param_dicts = [
+                    {
+                        "params":
+                            [p for n, p in self.unwrapped_model.named_parameters()
+                            if not misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, ["prompt"])],
+                        "lr": args.lr,
+                    },
+                    {
+                        "params": 
+                            [p for n, p in self.unwrapped_model.named_parameters() 
+                            if misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, ["prompt"])],
+                        "lr": args.lr_encoder,
+                    },
+                ]
+        else:
+            param_dicts = [
+                {
+                    "params":
+                        [p for n, p in self.unwrapped_model.named_parameters()
+                        if p.requires_grad],
+                    "lr": args.lr,
+                }
+            ]
 
         # optimizer
         if args.optimizer == 'adamw':
@@ -218,6 +305,14 @@ class Engine():
 
     def train(self):
         # torch.autograd.set_detect_anomaly(True)
+        # if self.model.__class__.__name__ == "PHMR" or self.model.module.__class__.__name__ == "PHMR":
+        #     if not hasattr(self.model, 'module') and hasattr(self.model.prompt_encoder, 'clip_encoder'):
+        #         del (self.model.prompt_encoder.clip_encoder)
+        #     elif hasattr(self.model.module.prompt_encoder, 'clip_encoder'):
+        #         del (self.model.module.prompt_encoder.clip_encoder)
+        #     # prompt_encoder.mask_downscaling.1.bias
+        #     # if hasattr('')
+
         self.accelerator.print('Start training!')
         for epoch in range(self.start_epoch, self.num_epochs):
             torch.cuda.empty_cache()
@@ -229,15 +324,56 @@ class Engine():
 
             sat_use_gt = (epoch < self.sat_gt_epoch)
 
+            # for step, (samples,targets,masks) in enumerate(self.train_dataloader):
             for step, (samples,targets) in enumerate(self.train_dataloader):
 
-                outputs = self.model(samples, targets, sat_use_gt = sat_use_gt, detach_j3ds = self.detach_j3ds)
+                if self.model.__class__.__name__ == "PHMR" or (hasattr(self.model, 'module') and self.model.module.__class__.__name__ == "PHMR"):
+                    inputs = []
+                    for i, target in enumerate(targets):
+                        img = tensor_to_BGR(unNormalize(samples[0].cpu()))[:,:,::-1]
+                        boxes = box_cxcywh_to_xyxy(target['boxes']).cpu()
+                        if hasattr(self.model, 'module') and self.model.module.__class__.__name__  == "PHMR":
+                            input_size = self.model.module.input_size
+                        else:
+                            input_size = self.model.input_size
+                        boxes[:, 0] = boxes[:, 0] * input_size
+                        boxes[:, 1] = boxes[:, 1] * input_size
+                        boxes[:, 2] = boxes[:, 2] * input_size
+                        boxes[:, 3] = boxes[:, 3] * input_size
+                        # img = np.ascontiguousarray(img)
+                        # for box in boxes.cpu().numpy():
+                        #     box = box.astype(np.int32)
+                        #     x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
+                        #     cv2.rectangle(img, (x1, y1), (x2, y2), (255,0,255), 3)
+                        # cv2.imwrite('test2.jpg', img)
+                        # import pdb; pdb.set_trace()
+                        
+                        
+                        _input = {'image_cv': img, 'boxes': boxes, 'cam_int': target['cam_intrinsics'].cpu(), 'text': None, 'masks': None}
+                        inputs.append(_input)
+                    # inputs = [{'image_cv': img, 'boxes': boxes, 'text': None, 'masks': None}]
+
+                    batch = prepare_batch(inputs, img_size=896, interaction=False)
+                    # img = tensor_to_BGR(unNormalize(samples[0].cpu()))[:,:,::-1]
+                    outputs = self.model(batch, targets)
+                else:
+                    outputs = self.model(samples, targets, sat_use_gt = sat_use_gt, detach_j3ds = self.detach_j3ds)
+                # outputs = self.model(samples, targets, masks=masks, sat_use_gt = sat_use_gt, detach_j3ds = self.detach_j3ds)
                 loss_dict = self.criterion(outputs, targets)
 
                 loss = sum(loss_dict[k] * self.weight_dict[k] for k in loss_dict.keys())
-                
 
                 self.accelerator.backward(loss)
+
+                # model = self.accelerator.unwrap_model(self.model) 
+                # unused = [(i, n, tuple(p.shape))
+                #         for i, (n, p) in enumerate(model.named_parameters())
+                #         if p.requires_grad and (p.grad is None)]
+
+                # self.accelerator.print(f"[step UNUSED params (no grad):")
+                # for i, n, shp in unused[:50]:  
+                #     self.accelerator.print(f"{i:4d}  {n:60s}  {shp}")
+
 
                 if self.accelerator.sync_gradients:
                     self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
@@ -264,10 +400,12 @@ class Engine():
                 self.global_step += 1
                 self.accelerator.wait_for_everyone()
 
-            # self.lr_scheduler.step()
+            self.lr_scheduler.step()
 
             if epoch % self.save_and_eval_epoch == 0 or epoch == self.num_epochs-1:
                 self.save_and_eval(epoch, save_ckpt=True)
+            else:
+                self.save_and_eval(epoch, save_ckpt=True, is_only_save=True)
         
         self.accelerator.end_training()
 
@@ -305,7 +443,7 @@ class Engine():
                     self.accelerator.print(f'thresh_{thresh}: ',error_dict)
                 self.accelerator.wait_for_everyone() 
   
-    def save_and_eval(self, epoch, save_ckpt=False):
+    def save_and_eval(self, epoch, save_ckpt=False, is_only_save=False):
         torch.cuda.empty_cache()
         # save current state and model
         if self.accelerator.is_main_process and save_ckpt:
@@ -314,10 +452,12 @@ class Engine():
             self.accelerator.save_state(ckpts_save_path, safe_serialization=False)
         self.accelerator.wait_for_everyone()
         
-        if epoch < self.least_eval_epoch:
-            return
-        results_save_path = os.path.join(self.output_dir,'results',self.exp_name, f'epoch_{epoch}_step_{self.global_step-1}')        
-        self.eval(results_save_path, epoch=epoch)
+        print(is_only_save, epoch, self.least_eval_epoch)
+        if not is_only_save:
+            # if epoch < self.least_eval_epoch:
+            #     return
+            results_save_path = os.path.join(self.output_dir,'results',self.exp_name, f'epoch_{epoch}_step_{self.global_step-1}')        
+            self.eval(results_save_path, epoch=epoch)
 
     def infer(self):
         self.model.eval()
