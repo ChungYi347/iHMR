@@ -1089,14 +1089,20 @@ class SetCriterionSAM2(nn.Module):
         # target_pnums = [t['pnum'] for t in targets]
 
         # print(output_pnums, target_pnums)
-        src = [ outputs['pred_'+loss][b][:targets[b]['pnum']] for b in range(len(targets)) if targets[b]['pnum'] > 0 and loss in targets[b]]
+        if loss == 'root_pose':
+            src = [ outputs['pred_poses'][b][:targets[b]['pnum']] for b in range(len(targets)) if targets[b]['pnum'] > 0 and 'poses' in targets[b]]
+        else:
+            src = [ outputs['pred_'+loss][b][:targets[b]['pnum']] for b in range(len(targets)) if targets[b]['pnum'] > 0 and loss in targets[b]]
 
         if len(src) == 0:
             losses[loss] = total_loss.squeeze(0)
             return losses
 
         src = torch.cat(src, dim=0)
-        target = torch.cat([targets[b][loss][:targets[b]['pnum']] for b in range(len(targets)) if targets[b]['pnum'] > 0 and loss in targets[b]], dim=0)
+        if loss == 'root_pose':
+            target = torch.cat([targets[b]['poses'][:targets[b]['pnum']] for b in range(len(targets)) if targets[b]['pnum'] > 0 and 'poses' in targets[b]], dim=0)
+        else:
+            target = torch.cat([targets[b][loss][:targets[b]['pnum']] for b in range(len(targets)) if targets[b]['pnum'] > 0 and loss in targets[b]], dim=0)
 
         if loss == 'j3ds':
             # Root aligned
@@ -1127,6 +1133,12 @@ class SetCriterionSAM2(nn.Module):
             src = src[:,:24,:]
             target = target[:,:24,:]
             loss_mask = loss_mask[:,:24,:]
+        # elif loss == 'poses':
+        #     src = src[:,3:]
+        #     target = target[:,3:]
+        # elif loss == 'root_pose':
+        #     src = src[:,:3]
+        #     target = target[:,:3]
 
         # if loss == 'verts':
         #     import numpy as np
@@ -1283,6 +1295,7 @@ class SetCriterionSAM2(nn.Module):
         loss_map = {
             # 'confs': self.loss_confs,
             'poses': self.loss_L1,
+            # 'root_pose': self.loss_L1,
             'betas': self.loss_L1,
             'j3ds': self.loss_L1,
             'j2ds': self.loss_L1,
@@ -1351,7 +1364,10 @@ class SetCriterionSAM2(nn.Module):
         
         # outputs['verts'] = outputs['smpl_vertices']
         for loss_name in self.losses:
-            out = self.get_loss(loss_name, outputs, targets, num_valid_instances[loss_name])
+            if loss_name == "root_pose":
+                out = self.get_loss(loss_name, outputs, targets, num_valid_instances['poses'])
+            else:
+                out = self.get_loss(loss_name, outputs, targets, num_valid_instances[loss_name])
             if loss_name in out:
                 losses[loss_name] = losses[loss_name] + out[loss_name]
 

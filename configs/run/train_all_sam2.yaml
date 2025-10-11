@@ -6,7 +6,7 @@ pretrain_path: 'weights/sat_hmr/sat_644.pth'
 resume: True # Resume from the latest ckpt
 
 num_epochs: 60
-save_and_eval_epoch: 1
+save_and_eval_epoch: 5
 least_eval_epoch: 1
 sat_gt_epoch: 1
 # lr
@@ -28,7 +28,7 @@ set_cost_kpts: 20
 
 losses: ['poses','betas','j2ds','j3ds', 'depths']
 # losses: ['poses','betas', 'j3ds']
-weight_dict: {'poses':5.,'betas':3.,'j3ds':8.,'j2ds':40.,'depths':0.5}
+weight_dict: {'poses':5.,'betas':3.,'j3ds':20.,'j2ds':100.,'depths':0.5}
 # weight_dict: {'poses':1., 'betas':1., 'j3ds':5.,}
 # losses: ['confs','poses','betas','boxes','j3ds','j2ds','depths','scale_map']
 # weight_dict: {'confs':4.,'poses':5.,'betas':3.,'boxes':2., 'giou':2., 'j3ds':8.,'j2ds':40.,'depths':0.5, 'map_confs': 4., 'map_scales': 4.}
@@ -44,8 +44,8 @@ aug_cfg:
 # train_datasets_split: ['train','train_6fps','train','train','train','train']  # ['train','train_6fps','validation_6fps']
 # train_datasets_used: ['agora','coco','3dpw']      # ['agora','bedlam','bedlam']
 # train_datasets_split: ['train','train','train']  # ['train','train_6fps','validation_6fps']
-train_datasets_used: ['3dpw', 'agora','bedlam']      # ['agora','bedlam','bedlam']
-train_datasets_split: ['train', 'train','train_6fps']  # ['train','train_6fps','validation_6fps']
+train_datasets_used: ['3dpw','agora','bedlam']      # ['agora','bedlam','bedlam']
+train_datasets_split: ['train','train','train_6fps']  # ['train','train_6fps','validation_6fps']
 # train_datasets_used: ['agora']      # ['agora','bedlam','bedlam']
 # train_datasets_split: ['train']  # ['train','train_6fps','validation_6fps']
 # train_batch_size: 6

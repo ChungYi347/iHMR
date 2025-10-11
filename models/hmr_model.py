@@ -192,13 +192,6 @@ class SAM2ImageEncoder(nn.Module):
             #         input_boxes[:, [1, 3]] = torch.sort(input_boxes[:, [1, 3]], dim=1)[0]
         self.input_boxes = input_boxes
         
-        if self.training:
-            # Randomly choose input type: 0 for box, 1 for mask
-            input_type = torch.randint(0, 2, (1,)).item()
-        else:
-            # During inference, always use box
-            input_type = 0
-
         # import matplotlib.pyplot as plt
         # def show_box(box, ax):
         #     x0, y0 = box[0], box[1]
@@ -218,12 +211,13 @@ class SAM2ImageEncoder(nn.Module):
         #     ax.imshow(mask_image)
 
         # masks, scores, _ = self.sam2_predictor.predict(
-        masks, scores, _, all_sparse_embeddings, all_dense_embeddings = self.sam2_predictor.predict_batch(
+        masks, scores, logits, all_sparse_embeddings, all_dense_embeddings = self.sam2_predictor.predict_batch(
             point_coords_batch=None,
             point_labels_batch=None,
             box_batch=input_boxes,
             multimask_output=False,
         )
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
         # import matplotlib.pyplot as plt
         # for img_id in range(len(body_bboxes)):
@@ -236,42 +230,34 @@ class SAM2ImageEncoder(nn.Module):
         #     plt.savefig(f'test_mask_all_{img_id}_{n}.png')
         #     plt.close()
         # import pdb; pdb.set_trace()
-        
-        # if input_type == 0:
-        #     # Use bounding box as input
-        #     masks, scores, _ = self.sam2_predictor.predict(
-        #         point_coords=None,
-        #         point_labels=None,
-        #         box=input_boxes,
-        #         multimask_output=False,
-        #     )
-        # else:
-        #     # Use mask as input - 2-stage SAM2 prediction
-        #     # Stage 1: Generate mask using bbox
-        #     stage1_masks, stage1_scores, stage1_logits = self.sam2_predictor.predict(
-        #         point_coords=None,
-        #         point_labels=None,
-        #         box=input_boxes,
-        #         multimask_output=False,
-        #     )
-            
-        #     # Use the first (and only) mask logits
-        #     if len(stage1_masks) > 0:
-        #         mask_input = stage1_logits[0, :, :]  # Use the first mask logits
-        #     else:
-        #         # Fallback: create simple mask from bbox if stage 1 failed
-        #         mask_input = np.zeros((img_h, img_w), dtype=np.uint8)
-        #         if len(input_boxes) > 0 and input_boxes[0, 2] > input_boxes[0, 0] and input_boxes[0, 3] > input_boxes[0, 1]:
-        #             x1, y1, x2, y2 = input_boxes[0].int().cpu().numpy()
-        #             mask_input[y1:y2, x1:x2] = 1
-            
-        #     # Stage 2: Refine using mask input (logits)
-        #     masks, scores, _ = self.sam2_predictor.predict(
-        #         point_coords=None,
-        #         point_labels=None,
-        #         mask_input=mask_input[None, :, :],  # Add batch dimension
-        #         multimask_output=False,
-        #     )
+
+        if self.training:
+            # Randomly choose input type: 0 for box, 1 for mask
+            input_type = torch.randint(0, 2, (1,)).item()
+        else:
+            # During inference, always use box
+            input_type = 1
+
+        if input_type == 1:
+            # Stage 2: Refine using mask input (logits)
+            masks, scores, logits, all_sparse_embeddings, all_dense_embeddings = self.sam2_predictor.predict_batch(
+                point_coords_batch=None,
+                point_labels_batch=None,
+                mask_input_batch=logits,  # Add batch dimension
+                multimask_output=False,
+                box_batch=input_boxes,
+            )
+
+            # import matplotlib.pyplot as plt
+            # for img_id in range(len(body_bboxes)):
+            #     plt.figure(figsize=(9, 9))
+            #     plt.imshow(imgs_list[img_id])
+            #     for n, _bbox in enumerate(input_boxes[img_id].cpu().numpy()):
+            #         show_mask((masks[img_id][n] > 0.0), plt.gca(), obj_id=n)
+            #         show_box(_bbox, plt.gca())
+            #     print(f'test_mask_all_{img_id}_{n}.png')
+            #     plt.savefig(f'test_mask_all_{img_id}_{n}.png')
+            #     plt.close()
         
         sam2_feats = [
             self.sam2_predictor._features['features'][0],  # 256x256
@@ -748,13 +734,11 @@ class Sam2Model(nn.Module):
         
         # Camera encoding (batch processing)
         image_embeddings = self.cam_encoder(image_embeddings, cam_int)
-        
-        # Dense positional encoding
         image_pe = self.prompt_encoder.get_dense_pe()
-
-        img_size = torch.stack([t['img_size'].flip(0) for t in targets])
+        
+        # img_size = torch.stack([t['img_size'].flip(0) for t in targets])
         # img_size = torch.stack([t['img_size'] for t in targets])
-        valid_ratio = img_size/self.input_size
+        # valid_ratio = img_size/self.input_size
         
         # cam_intrinsics = self.cam_intrinsics.repeat(batch_size, 1, 1, 1)
         # cam_intrinsics[...,:2,2] = cam_intrinsics[...,:2,2] * valid_ratio[:, None, :]
@@ -767,6 +751,7 @@ class Sam2Model(nn.Module):
         outputs_depths = []
         outputs_transl = []
         # SMPLX prediction (batch processing)
+        
         for _cam_int, _image_embeddings, _image_pe, sparse_embeddings, dense_embeddings \
             in zip(cam_int, image_embeddings, image_pe.repeat(cam_int.shape[0], 1, 1, 1), all_sparse_embeddings, all_dense_embeddings):
             # (pose, shape, transl, transl_c, depth_c, 
@@ -776,6 +761,9 @@ class Sam2Model(nn.Module):
             #     dense_embeddings, crossperson=False
             # )
             # (pose, shape, transl, transl_c, depth_c, features) = self.smplx_decoder(
+
+            # Dense positional encoding
+
             (pose, shape, cam_xys, features) = self.smplx_decoder(
                 _cam_int, _image_embeddings, _image_pe, sparse_embeddings, 
                 dense_embeddings, crossperson=False
@@ -820,9 +808,10 @@ class Sam2Model(nn.Module):
         cam_xys = output['cam_xys'].reshape(-1, 3) 
         # shape = outputs_shape + output['betas'].reshape(-1, 10)
         # pose = output['pose'].reshape(-1, 53, 6)  # SMPL-X has 53 joints
-        # pose = outputs_pose_6d + output['pose'].reshape(-1, 24 * 6)  # SMPL-X has 53 joints
-        shape = output['betas'].reshape(-1, 10)
-        pose = output['pose'].reshape(-1, 24 * 6)  # SMPL-X has 53 joints
+        # shape = output['betas'].reshape(-1, 10)
+        shape = output['betas'].reshape(-1, 10) + outputs_shape
+        # pose = output['pose'].reshape(-1, 24 * 6)  # SMPL-X has 53 joints
+        pose = output['pose'].reshape(-1, 24 * 6) + outputs_pose_6d  # SMPL-X has 53 joints
         # if self.rotation_matrix:
         pose = rot6d_to_axis_angle(pose.unsqueeze(0))
         # else:
