@@ -351,13 +351,15 @@ class Engine():
                         _input = {'image_cv': img, 'boxes': boxes, 'cam_int': target['cam_intrinsics'].cpu(), 'text': None, 'masks': None}
                         inputs.append(_input)
                     # inputs = [{'image_cv': img, 'boxes': boxes, 'text': None, 'masks': None}]
-
+                    
                     batch = prepare_batch(inputs, img_size=896, interaction=False)
                     # img = tensor_to_BGR(unNormalize(samples[0].cpu()))[:,:,::-1]
                     outputs = self.model(batch, targets)
                 else:
                     outputs = self.model(samples, targets, sat_use_gt = sat_use_gt, detach_j3ds = self.detach_j3ds)
                 # outputs = self.model(samples, targets, masks=masks, sat_use_gt = sat_use_gt, detach_j3ds = self.detach_j3ds)
+
+                
                 loss_dict = self.criterion(outputs, targets)
 
                 loss = sum(loss_dict[k] * self.weight_dict[k] for k in loss_dict.keys())

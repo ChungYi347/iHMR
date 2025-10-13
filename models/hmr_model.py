@@ -719,11 +719,12 @@ class Sam2Model(nn.Module):
         # Generate camera intrinsics for PHMR compatibility
         cam_int_list = []
         for i in range(batch_size):
-            if targets[i]['cam_intrinsics'].shape[0] != 1:
-                img_h, img_w = targets[i]['img_size']
-                focal_length = targets[i]['focals'][0]
-                cam_int_i = self.generate_camera_intrinsics(img_h, img_w, focal_length)
-                cam_int_i = cam_int_i.unsqueeze(0).to(device)  # Add batch dimension and move to device
+            if targets[i]['cam_intrinsics'].shape[0] != 1 :
+                # img_h, img_w = targets[i]['img_size']
+                # focal_length = targets[i]['focals'][0]
+                # cam_int_i = self.generate_camera_intrinsics(img_h, img_w, focal_length)
+                # cam_int_i = cam_int_i.unsqueeze(0).to(device)  # Add batch dimension and move to device
+                cam_int_list.append(self.cam_intrinsics[None])
             else:
                 cam_int_list.append(targets[i]['cam_intrinsics'])
         cam_int = torch.cat(cam_int_list, dim=0)

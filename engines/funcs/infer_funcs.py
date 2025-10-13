@@ -140,7 +140,7 @@ def inference(model, infer_dataloader, conf_thresh, results_save_path = None,
                 pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
                                             verts = pred_verts,
                                             smpl_faces = smpl_layer.faces,
-                                            cam_intrinsics = outputs['pred_intrinsics'][idx][0].reshape(3,3).detach().cpu(),
+                                            cam_intrinsics = outputs['pred_intrinsics'][idx].reshape(3,3).detach().cpu(),
                                             colors=colors)[:img_size[0],:img_size[1]]
                 cv2.imwrite(os.path.join(results_save_path, f'sam2_{img_name}.png'), pred_mesh_img)
             else:

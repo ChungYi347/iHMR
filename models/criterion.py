@@ -1270,6 +1270,8 @@ class SetCriterionSAM2(nn.Module):
     def loss_normalized_depths(self, loss, outputs, targets, num_instances, **kwargs):
         assert loss == 'depths' 
         losses = {}
+        device = self.device
+        total_loss = torch.zeros(1, dtype=torch.float32, device=device) 
         
         src = [outputs['pred_'+loss][b][:targets[b]['pnum'], [1]] 
                for b in range(len(targets)) if targets[b]['pnum'] > 0 and 'depths' in targets[b]]
