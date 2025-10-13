@@ -8,10 +8,12 @@ from .mpii import MPII
 from .coco import COCO
 from .pw3d import PW3D
 from .h36m import H36M
+from .posetrack import PoseTrack
 
 datasets_dict = {'bedlam': BEDLAM, 'agora': AGORA, 
                  'crowdpose': CROWDPOSE, 'mpii': MPII, 
-                 'coco': COCO, '3dpw': PW3D, 'h36m': H36M}
+                 'coco': COCO, '3dpw': PW3D, 'h36m': H36M,
+                 'posetrack': PoseTrack}
 
 class MultipleDatasets(Dataset):
     def __init__(self, datasets_used, datasets_split = None, make_same_len = False, **kwargs):
