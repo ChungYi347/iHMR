@@ -24,6 +24,8 @@ from utils.visualization import tensor_to_BGR, pad_img
 from utils.process_batch import prepare_batch
 from utils.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
 
+import wandb
+
 assert version.parse(accelerate.__version__) >= version.parse("1.10.0"),\
       "Please use accelerate >= 1.10.0 to support our updated implementation of distributed evaluation (August 30, 2025)."
 
@@ -39,6 +41,8 @@ class Engine():
                                 '3dpw_test': evaluate_3dpw,
                                 '3dpw_train': evaluate_3dpw,}
         self.inference_func = inference
+        self.wandb_id = None
+        self.args = args
 
         if self.mode == 'train':
             self.output_dir = os.path.join('./outputs')
@@ -129,7 +133,7 @@ class Engine():
                 self.accelerator.print(f'Loading pretrained weights: {args.pretrain_path}') 
                 state_dict = torch.load(args.pretrain_path, weights_only=False)
                 self.unwrapped_model.load_state_dict(state_dict, strict=False)
-
+            
         # to gpu
         self.model = self.accelerator.prepare(self.unwrapped_model)
         
@@ -295,12 +299,24 @@ class Engine():
                 else:
                     self.accelerator.print('No existing ckpts! Train from scratch.')               
 
+            if self.accelerator.is_main_process and hasattr(args, "wandb_logging") and args.wandb_logging:
+                config = {k: v for k, v in args.weight_dict.items() if any(k == loss for loss in args.losses)}
+                if self.wandb_id is None:
+                    wandb.init(project="myproj", config=config, entity="chunggi_lee-harvard-university")
+                else:
+                    wandb.init(project="myproj", id=self.wandb_id, resume="must", config=config, entity="chunggi_lee-harvard-university")
+                wandb.watch(self.model, log="parameters")
+                self.wandb_id = None if wandb.run is None else wandb.run.id
+
     def load_ckpt(self, epoch, step):   
         self.accelerator.print(f'Loading checkpoint: epoch_{epoch}_step_{step}') 
         ckpts_save_path = os.path.join(self.output_dir,'ckpts',self.exp_name, f'epoch_{epoch}_step_{step}')
         self.start_epoch = epoch + 1
         self.global_step = step + 1
         self.accelerator.load_state(ckpts_save_path)
+        if os.path.exists(os.path.join(ckpts_save_path, 'config.pt')):
+            loaded_config = torch.load(os.path.join(ckpts_save_path, 'config.pt'), map_location="cpu")
+            self.wandb_id = loaded_config.wandb_id
 
     def train(self):
         # torch.autograd.set_detect_anomaly(True)
@@ -394,6 +410,8 @@ class Engine():
                 if step % 10 == 0:
                     self.accelerator.log({('train/'+k):v for k,v in simplified_logs.items()},
                                             step=self.global_step)
+                    if hasattr(self.args, "wandb_logging") and self.args.wandb_logging:
+                        wandb.log(simplified_logs)
 
                 progress_bar.update(1)
                 progress_bar.set_postfix(**{"lr": self.lr_scheduler.get_last_lr()[0], "step": self.global_step})
@@ -450,6 +468,9 @@ class Engine():
         if self.accelerator.is_main_process and save_ckpt:
             ckpts_save_path = os.path.join(self.output_dir,'ckpts',self.exp_name, f'epoch_{epoch}_step_{self.global_step-1}')
             os.makedirs(ckpts_save_path,exist_ok=True)
+            if self.wandb_id is not None:
+                self.args.wandb_id = self.wandb_id
+                torch.save(self.args, os.path.join(ckpts_save_path, 'config.pt'))
             self.accelerator.save_state(ckpts_save_path, safe_serialization=False)
         self.accelerator.wait_for_everyone()
         
