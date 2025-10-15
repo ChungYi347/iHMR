@@ -14,3 +14,5 @@ scikit-learn
 hydra-core
 einops
 iopath
+yacs==0.1.8
+wandb
