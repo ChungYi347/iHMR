@@ -1,0 +1,61 @@
+seed: 42
+model: default
+
+pretrain: False
+pretrain_path: None
+resume: True # Resume from the latest ckpt
+
+num_epochs: 60
+save_and_eval_epoch: 5
+least_eval_epoch: 1
+sat_gt_epoch: 1
+# lr
+lr: 4.0e-5
+lr_encoder_names: ["encoder"]
+lr_encoder: 2.0e-5
+# optimizer AdamW
+optimizer: 'adamw'
+weight_decay: 0.0001
+num_warmup_steps: 0
+lr_scheduler: 'cosine'
+aux_loss: True
+
+set_cost_conf: 1
+set_cost_bbox: 1
+set_cost_giou: 1
+set_cost_kpts: 20
+
+
+losses: ['poses','betas','j2ds','j3ds', 'depths']
+# losses: ['poses','betas', 'j3ds']
+weight_dict: {'poses':1.,'betas':1.,'j3ds':25.,'j2ds':100.,'depths':1}
+detach_j3ds: False
+
+# train aug
+aug_cfg:
+  rot_range: [-15, 15]
+  scale_range: [0.8, 1.8]
+  flip_ratio: 0.5
+
+# train_datasets_used: ['agora','bedlam','coco','mpii','crowdpose','h36m']      # ['agora','bedlam','bedlam']
+# train_datasets_split: ['train','train_6fps','train','train','train','train']  # ['train','train_6fps','validation_6fps']
+# train_datasets_used: ['agora','coco','3dpw']      # ['agora','bedlam','bedlam']
+# train_datasets_split: ['train','train','train']  # ['train','train_6fps','validation_6fps']
+# train_datasets_used: ['3dpw','agora','bedlam']      # ['agora','bedlam','bedlam']
+# train_datasets_split: ['train','train','train_6fps']  # ['train','train_6fps','validation_6fps']
+train_datasets_used: ['agora','bedlam','coco','3dpw','posetrack']      # ['agora','bedlam','bedlam']
+train_datasets_split: ['train','train_6fps','train','train','train']  # ['train','train_6fps','validation_6fps']
+# train_datasets_used: ['agora']      # ['agora','bedlam','bedlam']
+# train_datasets_split: ['train']  # ['train','train_6fps','validation_6fps']
+# train_batch_size: 6
+# train_num_workers: 8
+train_batch_size: 6
+train_num_workers: 8
+
+eval_datasets_used: ['3dpw']
+eval_datasets_split: ['test']
+eval_vis_num: 20
+conf_thresh: [0.5]
+eval_batch_size: 12
+eval_num_workers: 8
+distributed_eval: True
