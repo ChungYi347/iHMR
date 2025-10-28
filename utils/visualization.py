@@ -31,6 +31,9 @@ def get_colors_rgb(size):
     # np.random.seed(131)
     return BASE_COLORS[np.random.choice(BASE_COLORS.shape[0], size=size, replace=False)]
 
+def get_colors_rgb_tracking_ids(tracking_ids):
+    return BASE_COLORS[tracking_ids]
+
 def tensor_to_BGR(img_tensor):
     img = img_tensor.numpy()*255
     img = img.astype(np.uint8).transpose((1,2,0))[:,:,::-1].copy()

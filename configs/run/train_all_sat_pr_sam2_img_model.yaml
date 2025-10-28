@@ -2,18 +2,22 @@ wandb_logging: true
 seed: 42
 model: default
 
-pretrain: False
-pretrain_path: None
+pretrain: True
+pretrain_path: './weights/sat_hmr/sat_644.pth'
 resume: True # Resume from the latest ckpt
+
+video_model: False
 
 num_epochs: 60
 save_and_eval_epoch: 5
 least_eval_epoch: 1
 sat_gt_epoch: 1
 # lr
-lr: 4.0e-5
+lr: 2.0e-5
 lr_encoder_names: ["encoder"]
-lr_encoder: 2.0e-5
+lr_encoder: 1.0e-5
+lr_propmt: 2.0e-5
+lr_prompt_names: ["dn_prompt_enc", "prompt_encoder", "pr_tgt_embed", "prompt_cross_attn"]
 # optimizer AdamW
 optimizer: 'adamw'
 weight_decay: 0.0001
@@ -27,9 +31,15 @@ set_cost_giou: 1
 set_cost_kpts: 20
 
 
-losses: ['poses','betas','j2ds','j3ds', 'depths']
+# losses: ['poses','betas','j3ds','j2ds', 'depths']
 # losses: ['poses','betas', 'j3ds']
-weight_dict: {'poses':5.,'betas':3.,'j3ds':8.,'j2ds':40.,'depths':0.5}
+# weight_dict: {'poses':5.,'betas':3.,'j3ds':8.,'j2ds':40.,'depths':0.5}
+# weight_dict: {'poses':1., 'betas':1., 'j3ds':5.,}
+losses: ['confs','poses','betas','boxes','j3ds','j2ds','depths','scale_map']
+# weight_dict: {'confs':4.,'poses':5.,'betas':3.,'boxes':2., 'giou':2., 'j3ds':8.,'j2ds':40.,'depths':0.5, 'map_confs': 4., 'map_scales': 4.}
+weight_dict: {'confs':4.,'poses':5.,'betas':3.,'boxes':2., 'giou':2., 'j3ds':8.,'j2ds':40.,'depths':0.5, 'map_confs': 4., 'map_scales': 4.,
+              'confs_pr':4.,'poses_pr':5,'betas_pr':3,'boxes_pr':2., 'giou_pr':2., 'j3ds_pr':8.,'j2ds_pr':40.,'depths_pr':0.5, 
+              'map_confs_pr': 4., 'map_scales_pr': 4.}
 detach_j3ds: False
 
 # train aug
@@ -42,23 +52,25 @@ aug_cfg:
 # train_datasets_split: ['train','train_6fps','train','train','train','train']  # ['train','train_6fps','validation_6fps']
 # train_datasets_used: ['agora','coco','3dpw']      # ['agora','bedlam','bedlam']
 # train_datasets_split: ['train','train','train']  # ['train','train_6fps','validation_6fps']
-# train_datasets_used: ['3dpw','agora','bedlam']      # ['agora','bedlam','bedlam']
-# train_datasets_split: ['train','train','train_6fps']  # ['train','train_6fps','validation_6fps']
-train_datasets_used: ['agora','bedlam','coco','3dpw','posetrack']      # ['agora','bedlam','bedlam']
-train_datasets_split: ['train','train_6fps','train','train','train']  # ['train','train_6fps','validation_6fps']
-# train_datasets_used: ['agora']      # ['agora','bedlam','bedlam']
+
+train_datasets_used: ['posetrack','agora','bedlam','coco','3dpw']      # ['agora','bedlam','bedlam']
+train_datasets_split: ['train','train','train_6fps','train','train']  # ['train','train_6fps','validation_6fps']
+sampling_weights: [1.0, 1.0, 0.2, 1.0, 1.0]
+
+# train_datasets_used: ['posetrack']      # ['agora','bedlam','bedlam']
 # train_datasets_split: ['train']  # ['train','train_6fps','validation_6fps']
-# train_batch_size: 6
-# train_num_workers: 8
-train_batch_size: 1
-train_num_workers: 1
+# sampling_weights: [0.01]
+train_batch_size: 6
+train_num_workers: 8
+# train_batch_size: 2
+# train_num_workers: 3
 
 eval_datasets_used: ['3dpw']
 eval_datasets_split: ['test']
 eval_vis_num: 20
 conf_thresh: [0.5]
-eval_batch_size: 12
-eval_num_workers: 8
+eval_batch_size: 16
+eval_num_workers: 12
 distributed_eval: True
 
 # seed: 42

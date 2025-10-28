@@ -11,8 +11,8 @@ import torch.nn.functional as F
 from PIL import Image
 import numpy as np
 from threading import Thread
-from detrsmpl.data.datasets.pipelines.transforms import Normalize
-from util.preprocessing import generate_patch_image, load_img
+# from detrsmpl.data.datasets.pipelines.transforms import Normalize
+from .preprocessing import generate_patch_image, load_img
 import torch.nn as nn
 
 
@@ -138,7 +138,7 @@ def _load_img_as_tensor(img_path, image_size, resize_size=None):
         # w, h = int(resize_size[0]), int(resize_size[1])
         # img_pil = img_pil.resize((w, h), resample=Image.BILINEAR)
         # img_pil = np.array(img_pil)[..., ::-1]
-        normalize = Normalize(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375])
+        normalize = _Normalize(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375])
         img_pil = normalize({"img": np.array(img_pil)})['img']
         _mean = torch.tensor([[[123.6750]], [[116.2800]], [[103.5300]]])
         _std = torch.tensor([[[58.3950]], [[57.1200]], [[57.3750]]])

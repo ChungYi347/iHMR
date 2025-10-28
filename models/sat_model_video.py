@@ -26,18 +26,39 @@ from models.encoders import build_encoder
 from .matcher import build_matcher
 from .decoder import build_decoder
 from .position_encoding import position_encoding_xy
-from .criterion import SetCriterion
-from .dn_components import prepare_for_cdn, dn_post_process
+from .criterion import SetCriterion_SATPR
+from .dn_components import prepare_for_cdn, dn_post_process, prepare_prompt_query_box
 import copy
 
 from configs.paths import smpl_model_path
 from models.human_models import SMPL_Layer
+from models.prompt.prompt_encoder import PromptEncoderBox
+
+from PIL import Image
+
+from models.sam2.build_sam2 import build_sam2
+from models.sam2.sam2_image_predictor import SAM2ImagePredictor
+from sam2.sam2_video_predictor import SAM2VideoPredictor
+from sam2.utils.misc import mask_to_box
+
+from utils.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, nms_xyxy, j2ds_to_bboxes_xywh
+from typing import List, Dict, Any, Tuple, Optional
+import hydra
+# from scenedetect.detectors import ContentDetector
 
 
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
-class Model(nn.Module):
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from models.prompt.prompt_encoder import PromptEncoderBox
+from inspect import isfunction
+from einops import rearrange
+
+class VideoModel(nn.Module):
     """ One-stage Multi-person Human Mesh Estimation via Scale-adaptive Tokens """
     def __init__(self, encoder, decoder,
                     num_queries,
@@ -95,10 +116,7 @@ class Model(nn.Module):
         self.encoder = encoder
         
         self.patch_size = encoder.patch_size
-        if self.encoder.__class__.__name__ == "DinoV3VisionTransformer":
-            assert self.patch_size == 16
-        else:
-            assert self.patch_size == 14
+        assert self.patch_size == 14
         
         self.use_sat = sat_cfg['use_sat']
         self.sat_cfg = sat_cfg
@@ -228,17 +246,26 @@ class Model(nn.Module):
             else:
                 raise NotImplementedError
 
+        sam2_model_cfg="sam2.1_hiera_l"
+        sam2_checkpoint="weights/sam2.1_hiera_large.pt"
+        enable_video = False
 
+        self.hidden_dim = hidden_dim
+        self.embed_dim = hidden_dim
+        self.img_size = 1288
+        # self.shot_detector = ContentDetector(threshold=50.0, min_scene_len=3)
+        # self.frame_count = 0
+         
     def lvl_pooling(self, tokens):
         assert len(tokens)%4 == 0
         C = tokens.shape[-1]
         return torch.max(tokens.view(-1, 4, C), dim=1)[0]
                 
-    def get_scale_map(self, x_list, masks=None):
+    def get_scale_map(self, x_list):
         if self.sat_cfg['use_additional_blocks']:
-            x_list = self.encoder.forward_additional_layers_list(x_list, masks_list=masks, end=self.sat_cfg['get_map_layer'], get_feature=False)
+            x_list = self.encoder.forward_additional_layers_list(x_list, end=self.sat_cfg['get_map_layer'], get_feature=False)
         else:
-            x_list = self.encoder.forward_specific_layers_list(x_list, masks_list=masks, end=self.sat_cfg['get_map_layer'], get_feature=False)
+            x_list = self.encoder.forward_specific_layers_list(x_list, end=self.sat_cfg['get_map_layer'], get_feature=False)
         
         cr_token_list = [x[:, :1 + self.encoder.num_register_tokens, :].squeeze(0) for x in x_list]
         x_tokens = torch.cat([x[:, 1 + self.encoder.num_register_tokens:, :].squeeze(0) for x in x_list], dim=0)
@@ -250,7 +277,7 @@ class Model(nn.Module):
         mask[torch.any(mask, dim=1)] = True
         return mask.flatten()
 
-    def forward_encoder(self, samples, targets, masks=None, use_gt = False):
+    def forward_encoder(self, samples, targets, use_gt = False):
         B = len(samples)
         C = self.encoder.embed_dim
         cr_token_list = [self.encoder_cr_token]*len(samples)
@@ -309,21 +336,24 @@ class Model(nn.Module):
                 lvl1_pos_x.append(pos_x)
                 lvl1_bids.append(torch.full_like(pos_y, i, dtype=torch.int64))
             
+
+            
             lvl1_img_patches_28 = torch.cat(lvl1_img_patches_28, dim=0)
             lvl1_zorders = torch.cat(lvl1_zorders, dim=0)
             lvl1_pos_y = torch.cat(lvl1_pos_y, dim=0)
             lvl1_pos_x = torch.cat(lvl1_pos_x, dim=0)
             lvl1_bids = torch.cat(lvl1_bids, dim=0)
 
+            
+
             # (L1, 3, 28, 28)
             assert len(lvl1_img_patches_28) == sum(lvl1_token_lens)
-            if self.encoder.__class__.__name__ == "DinoV3VisionTransformer":
-                lvl1_img_patches = F.interpolate(lvl1_img_patches_28, size = (16,16), mode='bilinear', align_corners=False)
-            else:
-                lvl1_img_patches = F.interpolate(lvl1_img_patches_28, size = (14,14), mode='bilinear', align_corners=False)
+            lvl1_img_patches = F.interpolate(lvl1_img_patches_28, size = (14,14), mode='bilinear', align_corners=False)
             # (L1, 3, 14, 14)
             lvl1_tokens = self.encoder_patch_norm[1](self.encoder_patch_proj[1](lvl1_img_patches).flatten(1))
             # (L1, C)
+            
+            
             
             assert len(lvl1_pos_y) == len(lvl1_tokens)
             full_pos_embed = self.preprocessed_pos_lvl1 if not self.training\
@@ -339,7 +369,7 @@ class Model(nn.Module):
             x_list = [torch.cat([cr, lvl1],dim=0).unsqueeze(0)\
                                  for (cr, lvl1) \
                                  in zip(cr_token_list, lvl1_tokens.split(lvl1_token_lens))]
-            scale_map, updated_cr_list, updated_lvl1 = self.get_scale_map(x_list, masks)
+            scale_map, updated_cr_list, updated_lvl1 = self.get_scale_map(x_list)
             # for visualization
             scale_map_dict = {'scale_map': scale_map, 'lens': lvl1_token_lens, 'hw': lvl1_feature_hw,
                               'pos_y': lvl1_pos_y, 'pos_x': lvl1_pos_x}
@@ -379,7 +409,7 @@ class Model(nn.Module):
             x_list = [torch.cat([cr, lvl0],dim=0).unsqueeze(0)\
                             for (cr, lvl0) \
                             in zip(cr_token_list, lvl0_tokens.split(lvl0_token_lens))]
-            x_list = self.encoder.forward_specific_layers_list(x_list, masks_list=masks, end=self.sat_cfg['get_map_layer'], get_feature=False)
+            x_list = self.encoder.forward_specific_layers_list(x_list, end=self.sat_cfg['get_map_layer'], get_feature=False)
             lvl0_tokens = torch.cat([x[:, 1 + self.encoder.num_register_tokens:, :].squeeze(0) for x in x_list], dim=0)
             assert len(lvl0_pos_x) == len(lvl0_tokens)
             # also update lvl1 and crs
@@ -490,8 +520,9 @@ class Model(nn.Module):
                 
 
         start = self.sat_cfg['get_map_layer'] if self.use_sat else 0
-        _, final_feature_list = self.encoder.forward_specific_layers_list(x_list, masks_list=masks, start = start, norm=True)
+        _, final_feature_list = self.encoder.forward_specific_layers_list(x_list, start = start, norm=True)
 
+        # default dab-detr pipeline
         # proj
         token_lens = [feature.shape[1] for feature in final_feature_list]
         final_features = self.feature_proj(torch.cat(final_feature_list,dim=1).squeeze(0)) # (sum(L), C)
@@ -541,8 +572,20 @@ class Model(nn.Module):
 
         return verts_cam, j3ds_cam, j2ds_img, depths, transl.flatten(2)
 
+    def get_all_outputs(self, inference_state):
+        results = []  # (obj_id, output_type, frame_id, value) 튜플을 담음
+        per_obj = inference_state['output_dict_per_obj']
 
-    def forward(self, samples: NestedTensor, targets, masks=None, sat_use_gt = False, detach_j3ds = False):
+        for obj_id, obj_outputs in per_obj.items():
+            for output_type in ['cond_frame_outputs', 'non_cond_frame_outputs']:
+                if output_type in obj_outputs:
+                    for frame_id, value in obj_outputs[output_type].items():
+                        # results.append([obj_id, output_type, frame_id, value])
+                        results.append(value['maskmem_features'])
+        return torch.tensor(results,device=value['maskmem_features'].device)
+
+
+    def forward(self, samples: NestedTensor, targets, tracker=None, sat_use_gt = False, detach_j3ds = False, seq_start=None):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -569,21 +612,22 @@ class Model(nn.Module):
                                             antialias=self.encoder.interpolate_antialias,
                                             size = (int(self.feature_size[1]),int(self.feature_size[1]))).squeeze(0).permute(1,2,0)
 
+        final_features, pos_embeds, token_lens, scale_map_dict, sat_dict\
+        = self.forward_encoder(samples, targets, use_gt = sat_use_gt)
 
+        device = samples[0].device
+        batch_size = len(samples)
         bs = len(targets)
 
         # get cam_intrinsics
         img_size = torch.stack([t['img_size'].flip(0) for t in targets])
         valid_ratio = img_size/self.input_size
         
+        # print(valid_ratio, img_size, self.input_size, self.cam_intrinsics.device) 
         cam_intrinsics = self.cam_intrinsics.repeat(bs, 1, 1, 1)
-        cam_intrinsics[...,:2,2] = cam_intrinsics[...,:2,2] * valid_ratio[:, None, :].to(cam_intrinsics.device)
+        cam_intrinsics[...,:2,2] = cam_intrinsics[...,:2,2] * valid_ratio[:, None, :].to(device)
+        
 
-
-        final_features, pos_embeds, token_lens, scale_map_dict, sat_dict\
-             = self.forward_encoder(samples, targets, masks=masks, use_gt = sat_use_gt)
-
-        # default dab-detr pipeline
         embedweight = (self.refpoint_embed.weight).unsqueeze(0).repeat(bs,1,1)
         tgt = (self.tgt_embed.weight).unsqueeze(0).repeat(bs,1,1)
 
@@ -599,10 +643,10 @@ class Model(nn.Module):
         tgt_lens = [tgt.shape[1]]*bs
 
         hs, reference = self.decoder(memory=final_features, memory_lens=token_lens,
-                                         tgt=tgt.flatten(0,1), tgt_lens=tgt_lens,
-                                         refpoint_embed=embedweight.flatten(0,1),
-                                         pos_embed=pos_embeds,
-                                         self_attn_mask = attn_mask)
+                                        tgt=tgt.flatten(0,1), tgt_lens=tgt_lens,
+                                        refpoint_embed=embedweight.flatten(0,1),
+                                        pos_embed=pos_embeds,
+                                        self_attn_mask = attn_mask)
         
         reference_before_sigmoid = inverse_sigmoid(reference)
         outputs_coords = []
@@ -612,6 +656,8 @@ class Model(nn.Module):
             outputs_coord = tmp.sigmoid()
             outputs_coords.append(outputs_coord)
         pred_boxes = torch.stack(outputs_coords)
+
+        # tracker.sam_prompt_encoder.mask_downscaling(out_mask_logits.clone())
 
         outputs_poses = []
         outputs_shapes = []
@@ -632,9 +678,6 @@ class Model(nn.Module):
                 outputs_pose = rot6d_to_axis_angle(outputs_pose_6d)
 
                 outputs_conf = self.conf_head(hs[lvl]).sigmoid()
-                # # select_queries_idx = torch.where(outputs_conf[0] > 0.5)[0]
-                # outputs_pose_6d[0][select_queries_idx]
-                # import pdb; pdb.set_trace()
 
                 # cam
                 cam_xys = self.cam_head(hs[lvl])
@@ -680,10 +723,11 @@ class Model(nn.Module):
 
         out = {'pred_poses': pred_poses[-1], 'pred_betas': pred_betas[-1],
                 'pred_boxes': pred_boxes[-1], 'pred_confs': pred_confs[-1], 
-               'pred_j3ds': pred_j3ds[-1], 'pred_j2ds': pred_j2ds[-1],
-               'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
-               'pred_depths': pred_depths[-1], 'pred_transl': pred_transl,
-               'img': samples}
+            'pred_j3ds': pred_j3ds[-1], 'pred_j2ds': pred_j2ds[-1],
+            'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
+            'pred_depths': pred_depths[-1], 'pred_transl': pred_transl}
+        j2d_boxes = j2ds_to_bboxes_xywh(out['pred_j2ds'][-1])[None]
+        out['pred_j2d_boxes'] = j2d_boxes
         
         if self.aux_loss and self.training:
             out['aux_outputs'] = self._set_aux_loss(pred_poses, pred_betas,
@@ -697,6 +741,104 @@ class Model(nn.Module):
 
         if self.training > 0 and self.use_dn:
             out['dn_meta'] = dn_meta
+
+        if not self.training:
+            B = out['pred_confs'].shape[0]
+            keep_indices_per_b = []
+            keep_track_ids_per_b = []
+            keep_origin_qidx_per_b = []
+
+            for b in range(B):
+                confs = out['pred_confs'][b].squeeze(-1) if out['pred_confs'][b].dim()>1 else out['pred_confs'][b]  # [Q]
+                
+                boxes = out['pred_boxes'][b] * self.input_size  # [Q,4]
+                # boxes = out['pred_j2d_boxes'][b]
+                kp2ds = out['pred_j2ds'][b]
+                Q = boxes.size(0)
+                qidx = torch.arange(Q, device=boxes.device)
+
+                # image_np = samples[0].detach().to("cpu").permute(1, 2, 0).numpy()
+                # mean = torch.tensor([123.675, 116.28, 103.53]).view(3, 1, 1).to(samples[0].device)
+                # std = torch.tensor([58.395, 57.12, 57.375]).view(3, 1, 1).to(samples[0].device)
+                # img = samples[0] * std + mean
+                # img = torch.clamp(img, 0, 255).to(torch.uint8).detach().to("cpu").permute(1, 2, 0).numpy()
+                # image_np = img[:, :, ::-1]  # RGB2BGR
+                # shots = self.shot_detector.process_frame(self.frame_count, image_np)
+
+                # self.frame_count += 1
+                # is_new_shot = len(shots) > 1 if self.frame_count > 1 else False
+                # print(self.frame_count, is_new_shot)
+
+                if seq_start and b == 0:
+                    mask = confs >= self.conf_thresh
+                    _ = self.tracker.init_frame(
+                        kp2ds[mask], boxes[mask], confs[mask], qidx[mask], nms_iou=0.5
+                    )
+
+                # active_ids, id2qidx, id2origin = self.tracker.update(kp2ds, boxes, confs, qidx)
+                active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx)
+
+                if len(id2qidx) == 0:
+                    keep_indices = torch.empty((0,), dtype=torch.long, device=boxes.device)
+                    keep_track_ids = []
+                    keep_origin_qidx = torch.empty((0,), dtype=torch.long, device=boxes.device)
+                else:
+                    ordered_ids = sorted(id2qidx.keys())
+                    keep_indices = torch.tensor(
+                        [id2qidx[tid] for tid in ordered_ids],
+                        dtype=torch.long, device=boxes.device
+                    )
+                    keep_origin_qidx = torch.tensor(
+                        [id2origin[tid] for tid in ordered_ids],
+                        dtype=torch.long, device=boxes.device
+                    )
+                    keep_track_ids = ordered_ids
+
+                keep_indices_per_b.append(keep_indices)
+                keep_track_ids_per_b.append(keep_track_ids)
+                keep_origin_qidx_per_b.append(keep_origin_qidx)
+
+            def _slice_field(field):
+                if field not in out or out[field] is None:
+                    return
+                x = out[field]
+                if not torch.is_tensor(x):
+                    return
+
+                if x.dim() >= 2 and x.size(0) == B:
+                    sliced_tensors = []
+                    for b in range(B):
+                        idxs = keep_indices_per_b[b]  # (Kb,)
+                        xb = x[b]
+                        if idxs.numel() == 0:
+                            empty_shape = (0,) + xb.shape[1:]
+                            sliced_tensors.append(xb.new_empty(empty_shape))
+                        else:
+                            sliced_tensors.append(xb.index_select(0, idxs))
+                    out[field] = torch.stack(sliced_tensors, dim=0)
+
+                elif x.dim() >= 1 and (B == 1):
+                    idxs = keep_indices_per_b[0]
+                    if idxs.numel() == 0:
+                        empty_shape = (0,) + x.shape[1:]
+                        out[field] = x.new_empty(empty_shape)
+                    else:
+                        out[field] = x.index_select(0, idxs)
+                else:
+                    return
+
+            for key in [
+                'pred_poses','pred_betas','pred_boxes','pred_confs',
+                'pred_j3ds','pred_j2ds','pred_depths','pred_verts',
+                'pred_transl', 'pred_j2d_boxes'
+            ]:
+                _slice_field(key)
+
+            out['track_keep_indices'] = keep_indices_per_b                  # list of LongTensor (per B)
+            out['track_origin_qidx']  = keep_origin_qidx_per_b              # list of LongTensor (per B)
+            out['track_ids']          = keep_track_ids_per_b   
+            out['active_ids'] = active_ids
+            out['ori_pred_boxes'] = pred_boxes[-1]
 
         return out
 
@@ -730,11 +872,11 @@ class MLP(nn.Module):
         return x
 
 
-def build_sat_model(args, set_criterion=True):
+def build_sat_video_model(args, set_criterion=True):
     encoder = build_encoder(args)
     decoder = build_decoder(args)
 
-    model = Model(
+    model = VideoModel(
         encoder,
         decoder,
         num_queries=args.num_queries,
@@ -765,7 +907,7 @@ def build_sat_model(args, set_criterion=True):
                 weight_dict.update({'map_confs': weight_dict['confs']})
             # weight_dict.update({'map_scales': })
 
-        criterion = SetCriterion(matcher, weight_dict, losses = losses, j2ds_norm_scale = args.input_size)
+        criterion = SetCriterion_SATPR(matcher, weight_dict, losses = losses, j2ds_norm_scale = args.input_size, num_queries = args.num_queries)
         return model, criterion
     else:
         return model, None

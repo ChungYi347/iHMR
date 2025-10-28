@@ -5,7 +5,7 @@ pretrain: True
 pretrain_path: 'weights/sat_hmr/sat_644.pth'
 resume: True # Resume from the latest ckpt
 
-num_epochs: 10
+num_epochs: 60
 save_and_eval_epoch: 1
 least_eval_epoch: 1
 sat_gt_epoch: 1

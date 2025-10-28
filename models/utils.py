@@ -165,3 +165,64 @@ def safe_zero_division(numerator: torch.Tensor, denominator: torch.Tensor) -> to
     eps: float = torch.finfo(numerator.dtype).tiny
     return numerator / torch.clamp(denominator, min=eps)
 
+class LayerNorm2d(nn.Module):
+    def __init__(self, num_channels: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(num_channels))
+        self.bias = nn.Parameter(torch.zeros(num_channels))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        u = x.mean(1, keepdim=True)
+        s = (x - u).pow(2).mean(1, keepdim=True)
+        x = (x - u) / torch.sqrt(s + self.eps)
+        x = self.weight[:, None, None] * x + self.bias[:, None, None]
+        return x
+
+class MaskEncoder(nn.Module):
+    def __init__(self, mask_in_chans=16, embed_dim=768, activation=nn.GELU):
+        super().__init__()
+        self.mask_downscaling = nn.Sequential(
+            nn.Conv2d(1, mask_in_chans // 4, kernel_size=2, stride=2),
+            LayerNorm2d(mask_in_chans // 4),
+            activation(),
+            nn.Conv2d(mask_in_chans // 4, mask_in_chans, kernel_size=2, stride=2),
+            LayerNorm2d(mask_in_chans),
+            activation(),
+            
+            # (256, 182, 322) -> (256, 91, 161)
+            nn.Conv2d(mask_in_chans, mask_in_chans*2, kernel_size=2, stride=2, padding=0),
+            LayerNorm2d(mask_in_chans*2),
+            activation(),
+
+            # (256, 91, 161) -> (512, 45, 80)
+            nn.Conv2d(mask_in_chans*2, mask_in_chans*4, kernel_size=2, stride=2, padding=0),
+            LayerNorm2d(mask_in_chans*4),
+            activation(),
+
+            # (512, 45, 80) -> (512, 22, 40)
+            nn.Conv2d(mask_in_chans*4, mask_in_chans*8, kernel_size=2, stride=2, padding=0),
+            LayerNorm2d(mask_in_chans*8),
+            activation(),
+
+            # (512, 22, 40) -> (512, 11, 20)  ← 추가된 단계
+            nn.Conv2d(mask_in_chans*8, mask_in_chans*16, kernel_size=2, stride=2, padding=0),
+            LayerNorm2d(mask_in_chans*16),
+            activation(),
+
+            # (512, 11, 20) -> (512, 1, 1)
+            nn.AdaptiveAvgPool2d(1),
+
+            # (512, 1, 1) -> (768, 1, 1)
+            nn.Conv2d(mask_in_chans*16, embed_dim, kernel_size=1, stride=1, padding=0),
+        )
+
+    def forward(self, x):
+        single = False
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+            single = True
+
+        x = self.mask_downscaling(x)  # (B, 768, 1, 1)
+        x = x.flatten(1)             # (B, 768)
+        return x[0] if single else x

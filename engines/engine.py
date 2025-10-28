@@ -12,9 +12,9 @@ import os
 import re
 import time
 import datetime
-from models import build_sat_model, build_hmr_model, build_sat_pr_model, build_sat_pr_sam2_model, build_phmr_model
+from models import build_sat_model, build_hmr_model, build_sat_pr_model, build_sat_pr_sam2_model, build_sat_pr_sam2_model_img, build_phmr_model, build_sat_video_model
 from .funcs.eval_funcs import *
-from .funcs.infer_funcs import inference
+from .funcs.infer_funcs import inference, eval_posetrack, eval_posetrack_video
 from utils import misc
 from utils.misc import get_world_size
 import torch.multiprocessing
@@ -26,6 +26,9 @@ from utils.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
 
 import wandb
 
+import shutil
+from pathlib import Path
+
 assert version.parse(accelerate.__version__) >= version.parse("1.10.0"),\
       "Please use accelerate >= 1.10.0 to support our updated implementation of distributed evaluation (August 30, 2025)."
 
@@ -33,13 +36,14 @@ class Engine():
     def __init__(self, args, mode='train'): 
         self.exp_name = args.exp_name
         self.mode = mode
-        assert mode in ['train','eval','infer']
+        assert mode in ['train','eval','infer','eval_posetrack','eval_posetrack_video']
         self.conf_thresh = args.conf_thresh
         self.eval_func_maps = {'agora_validation': evaluate_agora,
                                 'bedlam_validation_6fps': evaluate_agora,
                                 'agora_test': test_agora,
                                 '3dpw_test': evaluate_3dpw,
-                                '3dpw_train': evaluate_3dpw,}
+                                '3dpw_train': evaluate_3dpw,
+                                '3dpw_video_test': evaluate_3dpw_video,}
         self.inference_func = inference
         self.wandb_id = None
         self.args = args
@@ -63,6 +67,24 @@ class Engine():
                 timestamp = now.strftime("%Y%m%d_%H%M%S")
                 self.output_dir = os.path.join('./results',f'{self.exp_name}_infer_{timestamp}')
             self.distributed_infer = args.distributed_infer
+        elif self.mode == 'eval_posetrack':
+            output_dir = getattr(args, 'output_dir', None)
+            if output_dir is not None:
+                self.output_dir = output_dir
+            else:
+                now = datetime.datetime.now()
+                timestamp = now.strftime("%Y%m%d_%H%M%S")
+                self.output_dir = os.path.join('./results',f'{self.exp_name}_infer_{timestamp}')
+            self.distributed_infer = args.distributed_infer
+        elif self.mode == 'eval_posetrack_video':
+            output_dir = getattr(args, 'output_dir', None)
+            if output_dir is not None:
+                self.output_dir = output_dir
+            else:
+                now = datetime.datetime.now()
+                timestamp = now.strftime("%Y%m%d_%H%M%S")
+                self.output_dir = os.path.join('./results',f'{self.exp_name}_infer_{timestamp}')
+            self.distributed_infer = args.distributed_infer
 
         self.prepare_accelerator()
         self.prepare_models(args)
@@ -77,8 +99,8 @@ class Engine():
     def prepare_accelerator(self):
         if self.mode == 'train':
             self.accelerator = Accelerator(
-                mixed_precision="bf16",   
-                # gradient_accumulation_steps=getattr(self, "grad_accum_steps", 12),
+                # mixed_precision="bf16",   
+                # gradient_accumulation_steps=getattr(self, "grad_accum_steps", 6),
                 log_with="tensorboard",
                 project_dir=os.path.join(self.log_dir)
             )
@@ -102,7 +124,11 @@ class Engine():
         #     self.unwrapped_model, self.criterion = build_sat_pr_model(args, set_criterion = (self.mode == 'train'))
         # elif args.model_type == "sat_pr_sam2":
         #     self.unwrapped_model, self.criterion = build_sat_pr_sam2_model(args, set_criterion = (self.mode == 'train'))
-        self.unwrapped_model, self.criterion = build_hmr_model(args, set_criterion = (self.mode == 'train'))
+        # self.unwrapped_model, self.criterion = build_hmr_model(args, set_criterion = (self.mode == 'train'))
+        # self.unwrapped_model, self.criterion = build_sat_pr_sam2_model(args, set_criterion = (self.mode == 'train'))
+        self.unwrapped_model, self.criterion = build_sat_pr_sam2_model_img(args, set_criterion = (self.mode == 'train'))
+        # self.unwrapped_model, self.criterion = build_sat_video_model(args, set_criterion = (self.mode == 'train'))
+        
         if self.criterion is not None:
             self.weight_dict = self.criterion.weight_dict
         # load weights
@@ -131,7 +157,7 @@ class Engine():
                 self.unwrapped_model.load_state_dict(model_dict, strict=False)
             else:
                 self.accelerator.print(f'Loading pretrained weights: {args.pretrain_path}') 
-                state_dict = torch.load(args.pretrain_path, weights_only=False)
+                state_dict = torch.load(args.pretrain_path, weights_only=False, map_location='cpu')
                 self.unwrapped_model.load_state_dict(state_dict, strict=False)
             
         # to gpu
@@ -141,28 +167,50 @@ class Engine():
         # load dataset and dataloader
         if self.mode == 'train':
             self.accelerator.print('Loading training datasets:\n',
-                            [f'{d}_{s}' for d,s in zip(args.train_datasets_used, args.train_datasets_split)])
+                [f'{d}_{s}' for d,s in zip(args.train_datasets_used, args.train_datasets_split)])
             self.train_batch_size = args.train_batch_size
-            train_dataset = MultipleDatasets(args.train_datasets_used, args.train_datasets_split,
-                                        make_same_len=False, input_size=args.input_size, aug=True, 
-                                        mode = 'train', sat_cfg=args.sat_cfg,
-                                        aug_cfg=args.aug_cfg, backbone=args.encoder)
+
+            if args.video_model:
+                train_dataset = MultipleDatasets(args.train_datasets_used, args.train_datasets_split,
+                                            make_same_len=False, input_size=args.input_size, aug=True, 
+                                            mode = 'train', sat_cfg=args.sat_cfg,
+                                            aug_cfg=args.aug_cfg, backbone=args.encoder, sampling_weights=args.sampling_weights,
+                                            video_stride=args.video_stride if hasattr(args, 'video_stride') else 1)
+            else:
+                train_dataset = MultipleDatasets(args.train_datasets_used, args.train_datasets_split,
+                                            make_same_len=False, input_size=args.input_size, aug=True, 
+                                            mode = 'train', sat_cfg=args.sat_cfg,
+                                            aug_cfg=args.aug_cfg, backbone=args.encoder, sampling_weights=args.sampling_weights)
             self.train_dataloader = DataLoader(dataset=train_dataset, batch_size=self.train_batch_size,
                                                 shuffle=True,collate_fn=misc.collate_fn, 
                                                 num_workers=args.train_num_workers,pin_memory=True)
             self.train_dataloader = self.accelerator.prepare(self.train_dataloader)                                 
 
-        if self.mode != 'infer':
+        if self.mode == 'eval_posetrack':
+            pass
+        elif self.mode == 'eval_posetrack_video':
+            pass
+        elif self.mode != 'infer':
             self.accelerator.print('Loading evaluation datasets:',
                                 [f'{d}_{s}' for d,s in zip(args.eval_datasets_used, args.eval_datasets_split)])
             self.eval_batch_size = args.eval_batch_size
-            eval_ds = {f'{ds}_{split}': datasets_dict[ds](split = split, 
-                                                          mode = 'eval', 
-                                                          input_size = args.input_size, 
-                                                          aug = False,
-                                                          sat_cfg=args.sat_cfg,
-                                                          backbone=args.encoder)\
-                        for (ds, split) in zip(args.eval_datasets_used, args.eval_datasets_split)}
+            if args.video_model:
+                eval_ds = {f'{ds}_{split}': datasets_dict[ds](split = split, 
+                                                            mode = 'eval', 
+                                                            input_size = args.input_size, 
+                                                            aug = False,
+                                                            sat_cfg=args.sat_cfg,
+                                                            backbone=args.encoder, 
+                                                            video_stride=args.video_stride if hasattr(args, 'video_stride') else 1) 
+                            for (ds, split) in zip(args.eval_datasets_used, args.eval_datasets_split)}
+            else:
+                eval_ds = {f'{ds}_{split}': datasets_dict[ds](split = split, 
+                                                            mode = 'eval', 
+                                                            input_size = args.input_size, 
+                                                            aug = False,
+                                                            sat_cfg=args.sat_cfg,
+                                                            backbone=args.encoder) 
+                            for (ds, split) in zip(args.eval_datasets_used, args.eval_datasets_split)}
             self.eval_dataloaders = {k: DataLoader(dataset=v, batch_size=self.eval_batch_size,
                                         shuffle=False,collate_fn=misc.collate_fn, 
                                         num_workers=args.eval_num_workers,pin_memory=True)\
@@ -170,7 +218,6 @@ class Engine():
             if self.distributed_eval:
                 for (k,v) in self.eval_dataloaders.items():
                     self.eval_dataloaders.update({k: self.accelerator.prepare(v)})
-        
         else:
             img_folder = args.input_dir
             self.accelerator.print(f'Loading inference images from {img_folder}')
@@ -221,45 +268,83 @@ class Engine():
                         "lr": args.lr_propmt,
                     }
                 ]
-            elif hasattr(args, 'model_type') and args.model_type == "sat_pr_sam2":
+            # elif hasattr(args, 'model_type') and args.model_type == "sat_pr_sam2":
+            #     param_dicts = [
+            #         {
+            #             "params":
+            #                 [p for n, p in self.unwrapped_model.named_parameters()
+            #                 if not misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, ["prompt"])],
+            #             "lr": args.lr,
+            #         },
+            #         {
+            #             "params": 
+            #                 [p for n, p in self.unwrapped_model.named_parameters() 
+            #                 if misc.match_name_keywords(n, ["prompt"]) and p.requires_grad],
+            #             "lr": args.lr_propmt,
+            #         }
+            #     ]
+            else:
+                # param_dicts = [
+                #     {
+                #         "params":
+                #             [p for n, p in self.unwrapped_model.named_parameters()
+                #             if not misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad],
+                #         "lr": args.lr,
+                #     },
+                #     {
+                #         "params": 
+                #             [p for n, p in self.unwrapped_model.named_parameters() 
+                #             if misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad],
+                #         "lr": args.lr_encoder,
+                #     },
+                # ]
+                # del (self.unwrapped_model.dn_enc)
                 param_dicts = [
                     {
                         "params":
                             [p for n, p in self.unwrapped_model.named_parameters()
-                            if not misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, ["prompt"])],
+                            if not misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, args.lr_prompt_names)],
                         "lr": args.lr,
                     },
                     {
                         "params": 
                             [p for n, p in self.unwrapped_model.named_parameters() 
-                            if misc.match_name_keywords(n, ["prompt"]) and p.requires_grad],
+                            if misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, args.lr_prompt_names)],
+                        "lr": args.lr_encoder,
+                    },
+                    {
+                        "params": 
+                            [p for n, p in self.unwrapped_model.named_parameters() 
+                            if misc.match_name_keywords(n, args.lr_prompt_names) and p.requires_grad],
                         "lr": args.lr_propmt,
+                    },
+                ]
+                print([n for n, p in self.unwrapped_model.named_parameters() if not misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, args.lr_prompt_names)])
+                print([n for n, p in self.unwrapped_model.named_parameters() if misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, args.lr_prompt_names)])
+                print([n for n, p in self.unwrapped_model.named_parameters() if misc.match_name_keywords(n, args.lr_prompt_names) and p.requires_grad])
+        else:
+            if hasattr(args, 'model_type') and args.model_type == "sat_pr_sam2":
+                param_dicts = [
+                    {
+                        "params":
+                            [p for n, p in self.unwrapped_model.named_parameters()
+                            # if p.requires_grad and misc.match_name_keywords(n, ['mask_encoder', 'prompt_cross_attn'])],
+                            # if p.requires_grad and misc.match_name_keywords(n, ['prompt_encoder', 'dn_prompt_enc', 'prompt_cross_attn'])],
+                            if p.requires_grad and misc.match_name_keywords(n, ['bbox_weight_mlp', 'modulated_weight_mlp'])],
+                        "lr": args.lr,
                     }
                 ]
+                # print([n for n, p in self.unwrapped_model.named_parameters() if p.requires_grad and misc.match_name_keywords(n, ['mask_encoder', 'prompt_cross_attn'])])
+                print([n for n, p in self.unwrapped_model.named_parameters() if p.requires_grad and misc.match_name_keywords(n, ['bbox_weight_mlp', 'modulated_weight_mlp'])])
             else:
                 param_dicts = [
                     {
                         "params":
                             [p for n, p in self.unwrapped_model.named_parameters()
-                            if not misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, ["prompt"])],
+                            if p.requires_grad],
                         "lr": args.lr,
-                    },
-                    {
-                        "params": 
-                            [p for n, p in self.unwrapped_model.named_parameters() 
-                            if misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, ["prompt"])],
-                        "lr": args.lr_encoder,
-                    },
+                    }
                 ]
-        else:
-            param_dicts = [
-                {
-                    "params":
-                        [p for n, p in self.unwrapped_model.named_parameters()
-                        if p.requires_grad],
-                    "lr": args.lr,
-                }
-            ]
 
         # optimizer
         if args.optimizer == 'adamw':
@@ -311,6 +396,8 @@ class Engine():
     def load_ckpt(self, epoch, step):   
         self.accelerator.print(f'Loading checkpoint: epoch_{epoch}_step_{step}') 
         ckpts_save_path = os.path.join(self.output_dir,'ckpts',self.exp_name, f'epoch_{epoch}_step_{step}')
+        # import pdb; pdb.set_trace()
+        # ckpts_save_path = os.path.join('/home/cglee/SAT-HMR/outputs/ckpts/train_all/epoch_13_step_31569')
         self.start_epoch = epoch + 1
         self.global_step = step + 1
         self.accelerator.load_state(ckpts_save_path)
@@ -327,6 +414,32 @@ class Engine():
         #         del (self.model.module.prompt_encoder.clip_encoder)
         #     # prompt_encoder.mask_downscaling.1.bias
         #     # if hasattr('')
+
+        tracker = None
+        if self.model.__class__.__name__ == "VideoModel" or (hasattr(self.model, 'module') and self.model.module.__class__.__name__ == "VideoModel"):
+            with torch.no_grad():
+                import hydra
+                from models.sam2.build_sam2 import build_sam2_video_predictor
+                hydra.core.global_hydra.GlobalHydra.instance().clear()
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                config_dir = os.path.join(current_dir, "../sam2/configs/sam2.1")
+                hydra.initialize_config_dir(config_dir=config_dir)
+                checkpoint = "weights/sam2.1_hiera_large.pt"
+                model_cfg = "sam2.1_hiera_l"
+                tracker = build_sam2_video_predictor(model_cfg, checkpoint, device='cuda', disable_compile=True)
+                tracker.eval()
+
+        # sam2_image_model = None
+        # if self.model.__class__.__name__ == "ImageModel" or (hasattr(self.model, 'module') and self.model.module.__class__.__name__ == "ImageModel"):
+        #     from models.sat_model_pr_sam2_img import SAM2ImageEncoder
+        #     with torch.no_grad():
+        #         sam2_model_cfg="sam2.1_hiera_l"
+        #         sam2_checkpoint="weights/sam2.1_hiera_large.pt"
+        #         enable_video = False
+
+        #         sam2_image_model = SAM2ImageEncoder(sam2_model_cfg, sam2_checkpoint, enable_video)
+        #         sam2_image_model.eval()
+
 
         self.accelerator.print('Start training!')
         for epoch in range(self.start_epoch, self.num_epochs):
@@ -371,6 +484,10 @@ class Engine():
                     batch = prepare_batch(inputs, img_size=896, interaction=False)
                     # img = tensor_to_BGR(unNormalize(samples[0].cpu()))[:,:,::-1]
                     outputs = self.model(batch, targets)
+                elif self.model.__class__.__name__ == "VideoModel" or (hasattr(self.model, 'module') and self.model.module.__class__.__name__ == "VideoModel"):
+                    outputs = self.model(samples, targets, tracker=tracker, sat_use_gt = sat_use_gt, detach_j3ds = self.detach_j3ds)
+                elif self.model.__class__.__name__ == "ImageModel" or (hasattr(self.model, 'module') and self.model.module.__class__.__name__ == "ImageModel"):
+                    outputs = self.model(samples, targets, sat_use_gt = sat_use_gt, detach_j3ds = self.detach_j3ds)
                 else:
                     outputs = self.model(samples, targets, sat_use_gt = sat_use_gt, detach_j3ds = self.detach_j3ds)
                 # outputs = self.model(samples, targets, masks=masks, sat_use_gt = sat_use_gt, detach_j3ds = self.detach_j3ds)
@@ -382,7 +499,7 @@ class Engine():
 
                 self.accelerator.backward(loss)
 
-                # model = self.accelerator.unwrap_model(self.model) 
+                model = self.accelerator.unwrap_model(self.model) 
                 # unused = [(i, n, tuple(p.shape))
                 #         for i, (n, p) in enumerate(model.named_parameters())
                 #         if p.requires_grad and (p.grad is None)]
@@ -390,6 +507,12 @@ class Engine():
                 # self.accelerator.print(f"[step UNUSED params (no grad):")
                 # for i, n, shp in unused[:50]:  
                 #     self.accelerator.print(f"{i:4d}  {n:60s}  {shp}")
+                # no_grad_params = []
+                # for i, (n, p) in enumerate(model.named_parameters()):
+                #     if p.requires_grad and p.grad is None:
+                #         no_grad_params.append((i, n, tuple(p.shape)))
+                # print(f"[RANK] params without grad:", no_grad_params[:20], " ...")
+
 
 
                 if self.accelerator.sync_gradients:
@@ -406,12 +529,13 @@ class Engine():
                 # logs.update({"lr": self.lr_scheduler.get_last_lr()[0], "step": self.global_step})
                 if self.accelerator.is_main_process:
                     tqdm.write(f'[{epoch}-{step+1}/{len(self.train_dataloader)}]: ' + str(simplified_logs))
+                    if hasattr(self.args, "wandb_logging") and self.args.wandb_logging:
+                        wandb.log(simplified_logs)
 
                 if step % 10 == 0:
                     self.accelerator.log({('train/'+k):v for k,v in simplified_logs.items()},
                                             step=self.global_step)
-                    if hasattr(self.args, "wandb_logging") and self.args.wandb_logging:
-                        wandb.log(simplified_logs)
+                    
 
                 progress_bar.update(1)
                 progress_bar.set_postfix(**{"lr": self.lr_scheduler.get_last_lr()[0], "step": self.global_step})
@@ -421,7 +545,7 @@ class Engine():
 
             self.lr_scheduler.step()
 
-            if epoch % self.save_and_eval_epoch == 0 or epoch == self.num_epochs-1:
+            if (epoch != 0 and epoch % self.save_and_eval_epoch == 0) or epoch == self.num_epochs-1:
                 self.save_and_eval(epoch, save_ckpt=True)
             else:
                 self.save_and_eval(epoch, save_ckpt=True, is_only_save=True)
@@ -461,6 +585,37 @@ class Engine():
 
                     self.accelerator.print(f'thresh_{thresh}: ',error_dict)
                 self.accelerator.wait_for_everyone() 
+
+    def _parse_epoch(self, dir_name: str):
+        EPOCH_DIR_RE = re.compile(r"^epoch_(\d+)_step_(\d+)$")
+        m = EPOCH_DIR_RE.match(dir_name)
+        return int(m.group(1)) if m else None
+
+    def _update_symlink(self, link_path: Path, target_path: Path):
+        link_path = Path(link_path)
+        target_path = Path(target_path).resolve()
+        try:
+            if link_path.is_symlink() or link_path.exists():
+                link_path.unlink()
+            link_path.symlink_to(target_path, target_is_directory=True)
+        except OSError:
+            link_path.with_suffix(".txt").write_text(str(target_path))
+
+    def _cleanup_keep_multiples_of_5(self, ckpts_root: Path, keep_epoch: int):
+        if not ckpts_root.exists():
+            return
+        for d in ckpts_root.iterdir():
+            if not d.is_dir(): 
+                continue
+            e = self._parse_epoch(d.name)
+            if e is None:
+                continue
+            if (e % self.save_and_eval_epoch == 0) or (e == keep_epoch):
+                continue
+            try:
+                shutil.rmtree(d)
+            except Exception as ex:
+                print(f"[ckpt cleanup] remove fail: {d} ({ex})")
   
     def save_and_eval(self, epoch, save_ckpt=False, is_only_save=False):
         torch.cuda.empty_cache()
@@ -472,9 +627,14 @@ class Engine():
                 self.args.wandb_id = self.wandb_id
                 torch.save(self.args, os.path.join(ckpts_save_path, 'config.pt'))
             self.accelerator.save_state(ckpts_save_path, safe_serialization=False)
+
+            ckpts_root = Path(self.output_dir) / "ckpts" / self.exp_name
+            self._update_symlink(ckpts_root / "last_epoch", ckpts_save_path)
+            if epoch % self.save_and_eval_epoch == 0:
+                self._cleanup_keep_multiples_of_5(ckpts_root, keep_epoch=epoch)
+
         self.accelerator.wait_for_everyone()
         
-        print(is_only_save, epoch, self.least_eval_epoch)
         if not is_only_save:
             # if epoch < self.least_eval_epoch:
             #     return
@@ -500,6 +660,175 @@ class Engine():
                         distributed = self.distributed_infer,
                         accelerator = self.accelerator)
             self.accelerator.wait_for_everyone()
+
+    def eval_posetrack(self, args):
+        self.model.eval()
+        self.model.is_tracking_eval = True
+
+        rank = self.accelerator.process_index
+        world_size = self.accelerator.num_processes
+
+        folder_list = sorted([
+            os.path.join(args.input_dir, f) 
+            for f in os.listdir(args.input_dir) 
+            if os.path.isdir(os.path.join(args.input_dir, f))
+        ])
+
+        target_folders = ['003419_mpii_test']
+        # target_folders = ['003742_mpii_test']
+        # target_folders = ['000809_mpii_test']
+        # # target_folders = ['004622_mpii_test', '015241_mpii_test']
+        # # target_folders = ['009470_mpii_test']
+        folder_list = [f for f in folder_list if any(target in f for target in target_folders)]
+        # print(args.total_gpus)
+
+        # assigned_folders = folder_list[args.gpu_id::args.total_gpus]
+        assigned_folders = folder_list[args.gpu_id::1]
+        if len(assigned_folders) == 0:
+            self.accelerator.print(f"[Rank {rank}] No folders assigned. Skip.")
+            return
+
+        self.accelerator.print(f"[Rank {rank}] will process {len(assigned_folders)} folders")
+
+        for i, img_folder in enumerate(assigned_folders):
+            self.accelerator.print(f"[Rank {rank}] [{i+1}/{len(assigned_folders)}] {img_folder}")
+
+            if hasattr(self, "tracker"):
+                self.tracker.reset()
+            seq_start = True
+
+            infer_ds = COMMON(
+                img_folder=img_folder,
+                input_size=args.input_size,
+                aug=False,
+                mode='infer',
+                sat_cfg=args.sat_cfg,
+                backbone=args.encoder
+            )
+
+            infer_loader = DataLoader(
+                dataset=infer_ds,
+                batch_size=args.infer_batch_size,
+                shuffle=False,
+                collate_fn=misc.collate_fn,
+                num_workers=args.infer_num_workers,
+                pin_memory=True
+            )
+
+            # if self.distributed_infer:
+            #     infer_loader = self.accelerator.prepare(infer_loader)
+
+            unwrapped_model = self.unwrapped_model 
+
+            from models.tracker import QueryTracker
+            boxes_format = "cxcywh"  
+            self.unwrapped_model.tracker = QueryTracker(self.args.conf_thresh[0], self.args.iou_match_thresh, self.args.iou_new_thresh, self.args.max_age, boxes_format)
+            
+            results_save_path = self.output_dir
+            if self.accelerator.is_main_process:
+                os.makedirs(results_save_path,exist_ok=True)
+            
+            self.accelerator.print('Using following threshold(s): ', self.conf_thresh)
+            img_folder = infer_loader.dataset.dataset_path.split('/')[-1]
+            for thresh in self.conf_thresh:
+                eval_posetrack(model = unwrapped_model, 
+                        infer_dataloader = infer_loader, 
+                        conf_thresh = thresh,
+                        results_save_path = os.path.join(results_save_path,f'{img_folder}'),
+                        distributed = self.distributed_infer,
+                        accelerator = self.accelerator,
+                        args = self.args)
+                # self.accelerator.wait_for_everyone()
+
+    def eval_posetrack_video(self, args):
+        self.model.eval()
+        self.model.is_tracking_eval = True
+
+        rank = self.accelerator.process_index
+        world_size = self.accelerator.num_processes
+
+        folder_list = sorted([
+            os.path.join(args.input_dir, f) 
+            for f in os.listdir(args.input_dir) 
+            if os.path.isdir(os.path.join(args.input_dir, f))
+        ])
+
+        # target_folders = ['016236_mpii_test', '018092_mpii_test', '002214_mpii_test', '002371_mpii_test']
+        # target_folders = ['004622_mpii_test', '015241_mpii_test']
+        # target_folders = ['009470_mpii_test']
+        # folder_list = [f for f in folder_list if any(target in f for target in target_folders)]
+        # print(args.total_gpus)
+
+        assigned_folders = folder_list[args.gpu_id::args.total_gpus]
+        if len(assigned_folders) == 0:
+            self.accelerator.print(f"[Rank {rank}] No folders assigned. Skip.")
+            return
+
+        sam2_tracker = None
+        with torch.no_grad():
+            import hydra
+            from models.sam2.build_sam2 import build_sam2_video_predictor
+            hydra.core.global_hydra.GlobalHydra.instance().clear()
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            config_dir = os.path.join(current_dir, "../sam2/configs/sam2.1")
+            hydra.initialize_config_dir(config_dir=config_dir)
+            checkpoint = "weights/sam2.1_hiera_large.pt"
+            model_cfg = "sam2.1_hiera_l"
+            sam2_tracker = build_sam2_video_predictor(model_cfg, checkpoint, device='cuda', disable_compile=True)
+            sam2_tracker.eval()
+
+        self.accelerator.print(f"[Rank {rank}] will process {len(assigned_folders)} folders")
+
+        for i, img_folder in enumerate(assigned_folders):
+            self.accelerator.print(f"[Rank {rank}] [{i+1}/{len(assigned_folders)}] {img_folder}")
+
+            if hasattr(self, "tracker"):
+                self.tracker.reset()
+            seq_start = True
+
+            infer_ds = COMMON(
+                img_folder=img_folder,
+                input_size=args.input_size,
+                aug=False,
+                mode='infer',
+                sat_cfg=args.sat_cfg,
+                backbone=args.encoder
+            )
+
+            infer_loader = DataLoader(
+                dataset=infer_ds,
+                batch_size=args.infer_batch_size,
+                shuffle=False,
+                collate_fn=misc.collate_fn,
+                num_workers=args.infer_num_workers,
+                pin_memory=True
+            )
+
+            # if self.distributed_infer:
+            #     infer_loader = self.accelerator.prepare(infer_loader)
+
+            unwrapped_model = self.unwrapped_model 
+
+            from models.tracker import QueryTracker
+            boxes_format = "cxcywh"  
+            self.unwrapped_model.tracker = QueryTracker(self.args.conf_thresh[0], self.args.iou_match_thresh, self.args.iou_new_thresh, self.args.max_age, boxes_format)
+            
+            results_save_path = self.output_dir
+            if self.accelerator.is_main_process:
+                os.makedirs(results_save_path,exist_ok=True)
+            
+            self.accelerator.print('Using following threshold(s): ', self.conf_thresh)
+            img_folder = infer_loader.dataset.dataset_path.split('/')[-1]
+            for thresh in self.conf_thresh:
+                eval_posetrack_video(model = unwrapped_model, 
+                        infer_dataloader = infer_loader, 
+                        conf_thresh = thresh,
+                        results_save_path = os.path.join(results_save_path,f'{img_folder}'),
+                        distributed = self.distributed_infer,
+                        accelerator = self.accelerator,
+                        args = self.args,
+                        sam2_tracker = sam2_tracker)
+                # self.accelerator.wait_for_everyone()
 
 
 def flatten_dict(d, parent_key='', sep='-'):

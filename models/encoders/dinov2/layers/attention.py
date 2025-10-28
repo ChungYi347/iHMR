@@ -19,6 +19,7 @@ from torch import nn
 from typing import List, Tuple
 
 import torch.nn.functional as F
+from einops import rearrange
 
 logger = logging.getLogger("dinov2")
 
@@ -213,3 +214,114 @@ class MemEffAttention(Attention):
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
+
+class SelfAttention(Attention):
+    def forward(self, x: Tensor, attn_bias=None) -> Tensor:
+        if not XFORMERS_AVAILABLE:
+            if attn_bias is not None:
+                raise AssertionError("xFormers is required for using nested tensors")
+            return super().forward(x)
+
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
+
+        q, k, v = qkv[0] * self.scale, qkv[1], qkv[2]
+        attn = q @ k.transpose(-2, -1)
+
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+
+class MemEffCrossAttention(nn.Module):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0):
+        super().__init__()
+        inner_dim = 768
+        self.heads = heads
+        self.dim_head = dim_head
+        self.inner_dim = inner_dim
+        self.scale = dim_head**-0.5
+
+        self.attend = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(dropout)
+        
+        self.to_q = nn.Linear(dim, inner_dim, bias=False)
+        self.to_k = nn.Linear(dim, inner_dim, bias=False)
+        self.to_v = nn.Linear(dim, inner_dim, bias=False)
+
+        self.proj = nn.Linear(inner_dim, dim, bias=True)
+        # self.proj_drop = nn.Dropout(dropout)
+
+    def forward(self, q, k, v, attn_bias=None) -> Tensor:
+        q = self.to_q(q)
+        k = self.to_k(k)
+        # v = v.to(q.dtype) 
+        v = self.to_v(v)
+
+        B, N, C = q.shape
+        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b n h d", h=self.heads), [q, k, v])
+
+        x = memory_efficient_attention(q, k, v, attn_bias=attn_bias)
+        x = x.reshape([B, N, self.inner_dim])
+        x = self.proj(x)
+        # x = self.proj_drop(x)
+
+        return x
+
+class MemEffCrossAttentionWeight(nn.Module):
+    def __init__(self, dim, heads=1, dim_head=64, dropout=0.0):
+        super().__init__()
+        inner_dim = 64
+        self.heads = heads
+        self.dim_head = dim_head
+        self.inner_dim = inner_dim
+        self.scale = dim_head**-0.5
+
+        self.attend = nn.Softmax(dim=-1)
+        self.to_q = nn.Linear(dim, inner_dim, bias=False)
+        self.to_k = nn.Linear(dim, inner_dim, bias=False)
+        # self.to_v = nn.Linear(dim, inner_dim, bias=False)
+
+    def forward(self, q, k, v, attn_bias=None) -> Tensor:
+        q = self.to_q(q)
+        k = self.to_k(k)
+        # v = self.to_v(v)
+
+        B, N_Q, C = q.shape  
+        B, N_K, _ = k.shape 
+
+        q, k = map(lambda t: rearrange(t, "b n (h d) -> b n h d", h=self.heads), [q, k])
+
+        q = q * self.scale
+        
+        q = q.permute(0, 2, 1, 3) 
+        k = k.permute(0, 2, 1, 3)
+        # v = v.permute(0, 2, 1, 3)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) 
+
+        # attn_weights = self.attend(scores)
+        N_topK = 3
+        minus_inf = -1e9 
+
+        k_to_find = scores.size(-1) - N_topK 
+        threshold, _ = torch.kthvalue(scores, k=k_to_find, dim=-1, keepdim=True)
+
+        mask = scores < threshold
+        scores_masked = scores.masked_fill(mask, minus_inf) 
+        attn_weights = torch.softmax(scores_masked, dim=-1)
+
+        # row_sums = attn_weights.sum(dim=-1)
+        # print(f"가중치 총합의 평균: {row_sums.mean().item():.6f}") 
+
+        # non_zero_counts = (attn_weights > 1e-6).sum(dim=-1)
+        # print(f"0이 아닌 가중치 개수의 평균: {non_zero_counts.float().mean().item():.2f}")
+
+        # attn_weights = self.attend(scores)
+
+        return attn_weights

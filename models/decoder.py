@@ -288,7 +288,18 @@ class XformerDecoderLayer(nn.Module):
         k = k.view(B, num_queries, self.nhead, self.d_model // self.nhead)
         v = v.view(B, num_queries, self.nhead, self.d_model // self.nhead)
 
-        tgt2 = memory_efficient_attention(q, k, v, attn_bias=self_attn_bias)
+        if self_attn_bias == None:
+            tgt2 = memory_efficient_attention(q, k, v, attn_bias=self_attn_bias)
+        else:
+            self_attn_bias = self_attn_bias.to(q.dtype)
+            N = self_attn_bias.size(-1)
+            pad = (-N) % 8 
+            if pad:
+                bias_store = self_attn_bias.new_zeros(self_attn_bias.shape[:-1] + (N + pad,))
+                bias_store[..., :N] = self_attn_bias
+                self_attn_bias = bias_store[..., :N] 
+
+            tgt2 = memory_efficient_attention(q, k, v, attn_bias=self_attn_bias.to(q.dtype))
         tgt2 = self.sa_out_proj(tgt2.view(L_tgt, self.d_model))
 
         tgt = tgt_b4n + self.dropout1(tgt2)

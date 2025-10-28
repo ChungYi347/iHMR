@@ -16,3 +16,10 @@ einops
 iopath
 yacs==0.1.8
 wandb
+motmetrics
+pycocotools
+tabulate
+shapely
+lap
+scenedetect
+filterpy
