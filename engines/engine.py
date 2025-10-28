@@ -99,7 +99,7 @@ class Engine():
     def prepare_accelerator(self):
         if self.mode == 'train':
             self.accelerator = Accelerator(
-                # mixed_precision="bf16",   
+                mixed_precision="bf16",   
                 # gradient_accumulation_steps=getattr(self, "grad_accum_steps", 6),
                 log_with="tensorboard",
                 project_dir=os.path.join(self.log_dir)
