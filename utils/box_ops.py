@@ -50,30 +50,67 @@ def box_iou_xyxy(boxes1, boxes2):
     return inter / union
 
 
+# def generalized_box_iou(boxes1, boxes2):
+#     """
+#     Generalized IoU from https://giou.stanford.edu/
+
+#     The boxes should be in [x0, y0, x1, y1] format
+
+#     Returns a [N, M] pairwise matrix, where N = len(boxes1)
+#     and M = len(boxes2)
+#     """
+#     # degenerate boxes gives inf / nan results
+#     # so do an early check
+#     assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
+#     assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
+#     # except:
+#     #     import ipdb; ipdb.set_trace()
+#     iou, union = box_iou(boxes1, boxes2)
+
+#     lt = torch.min(boxes1[:, None, :2], boxes2[:, :2])
+#     rb = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
+
+#     wh = (rb - lt).clamp(min=0)  # [N,M,2]
+#     area = wh[:, :, 0] * wh[:, :, 1]
+
+#     return iou - (area - union) / (area + 1e-6)
+
 def generalized_box_iou(boxes1, boxes2):
     """
     Generalized IoU from https://giou.stanford.edu/
-
     The boxes should be in [x0, y0, x1, y1] format
-
     Returns a [N, M] pairwise matrix, where N = len(boxes1)
     and M = len(boxes2)
     """
-    # degenerate boxes gives inf / nan results
-    # so do an early check
-    assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
-    assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
-    # except:
-    #     import ipdb; ipdb.set_trace()
+    x1_1 = torch.min(boxes1[:, 0], boxes1[:, 2])
+    y1_1 = torch.min(boxes1[:, 1], boxes1[:, 3])
+    x2_1 = torch.max(boxes1[:, 0], boxes1[:, 2])
+    y2_1 = torch.max(boxes1[:, 1], boxes1[:, 3])
+    boxes1 = torch.stack([x1_1, y1_1, x2_1, y2_1], dim=-1)
+
+    x1_2 = torch.min(boxes2[:, 0], boxes2[:, 2])
+    y1_2 = torch.min(boxes2[:, 1], boxes2[:, 3])
+    x2_2 = torch.max(boxes2[:, 0], boxes2[:, 2])
+    y2_2 = torch.max(boxes2[:, 1], boxes2[:, 3])
+    boxes2 = torch.stack([x1_2, y1_2, x2_2, y2_2], dim=-1)
+
+    invalid1 = (boxes1[:, 2] <= boxes1[:, 0]) | (boxes1[:, 3] <= boxes1[:, 1])
+    invalid2 = (boxes2[:, 2] <= boxes2[:, 0]) | (boxes2[:, 3] <= boxes2[:, 1])
+
+    if invalid1.any() or invalid2.any():
+        print(f"[Warning] Found {invalid1.sum()} + {invalid2.sum()} invalid boxes in GIoU calc.")
+        boxes1[invalid1] = 0
+        boxes2[invalid2] = 0
+
     iou, union = box_iou(boxes1, boxes2)
 
     lt = torch.min(boxes1[:, None, :2], boxes2[:, :2])
     rb = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
-
-    wh = (rb - lt).clamp(min=0)  # [N,M,2]
+    wh = (rb - lt).clamp(min=0)  
     area = wh[:, :, 0] * wh[:, :, 1]
 
     return iou - (area - union) / (area + 1e-6)
+
 
 
 

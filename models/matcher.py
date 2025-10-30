@@ -84,20 +84,10 @@ class HungarianMatcher(nn.Module):
         mean_dist = (all_dist * tgt_kpts_mask[None,:,:]).sum(-1) / tgt_kpts_vis_cnt[None,:]
         cost_kpts = mean_dist
 
-        try:
-            # Compute the giou cost betwen boxes
-            # import ipdb; ipdb.set_trace()
-            cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
-
-            # Final cost matrix
-            C = self.cost_conf*cost_conf + self.cost_kpts*cost_kpts + self.cost_bbox * cost_bbox + self.cost_giou * cost_giou
-            C = C.view(bs, num_queries, -1).cpu()
-            C = torch.nan_to_num(C, nan=1e12, posinf=1e12, neginf=1e12)
-        except:
-            # Final cost matrix
-            C = self.cost_conf*cost_conf + self.cost_kpts*cost_kpts # + self.cost_bbox * cost_bbox
-            C = C.view(bs, num_queries, -1).cpu()
-            C = torch.nan_to_num(C, nan=1e12, posinf=1e12, neginf=1e12)
+        # Compute the giou cost betwen boxes
+        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
+        C = self.cost_conf*cost_conf + self.cost_kpts*cost_kpts + self.cost_bbox * cost_bbox + self.cost_giou * cost_giou
+        C = C.view(bs, num_queries, -1).cpu()
 
         sizes = [len(v["boxes"]) for v in targets]
         indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
