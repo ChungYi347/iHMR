@@ -94,7 +94,7 @@ class HungarianMatcher(nn.Module):
             C = C.view(bs, num_queries, -1).cpu()
         except:
             # Final cost matrix
-            C = self.cost_conf*cost_conf + self.cost_kpts*cost_kpts + self.cost_bbox * cost_bbox
+            C = self.cost_conf*cost_conf + self.cost_kpts*cost_kpts # + self.cost_bbox * cost_bbox
             C = C.view(bs, num_queries, -1).cpu()
 
         sizes = [len(v["boxes"]) for v in targets]
