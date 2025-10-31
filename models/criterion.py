@@ -997,16 +997,18 @@ class SetCriterion_SATPR(nn.Module):
                         if key in t:
                             del t[key]
 
-            outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs' and k != 'enc_outputs' and k != 'sat'}
-            indices = self.matcher(outputs_without_aux, targets)
+            # outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs' and k != 'enc_outputs' and k != 'sat'}
+            # indices = self.matcher(outputs_without_aux, targets)
 
             total_query = outputs['pred_poses'].shape[1]
-            # outputs_pr = self._slice_outputs_for_range(outputs, 0, total_query - self.num_queries) 
-            # outputs_ref = self._slice_outputs_for_range(outputs, total_query - self.num_queries, total_query)
-            # outputs_ref['enc_outputs'] = outputs['enc_outputs']
+            outputs_pr = self._slice_outputs_for_range(outputs, 0, total_query - self.num_queries) 
+            outputs_ref = self._slice_outputs_for_range(outputs, total_query - self.num_queries, total_query)
+            outputs_ref['enc_outputs'] = outputs['enc_outputs']
             # # Retrieve the matching between the outputs of the last layer and the targets
             # pr_indices = self.matcher(outputs_pr, targets)
-            # ref_indices = self.matcher(outputs_ref, targets)
+            ref_indices = self.matcher(outputs_ref, targets)
+            pr_cnt = [target['pnum'] for target in targets]
+            pr_indices = [(torch.arange(s), torch.arange(s)) for s in pr_cnt]
             self.device = outputs['pred_poses'].device
             num_valid_instances = self.get_valid_instances(targets)
 
@@ -1184,6 +1186,16 @@ class SetCriterion_SATPR_IMG(nn.Module):
             src = src[:,:45,:]
             target = target[:,:45,:]
         elif loss == 'j2ds':
+            # if targets[0]['ds'] == 'posetrack':
+            #     target = torch.cat([t['ori_'+loss][i] for t, (_, i) in zip(targets, indices) if loss in t], dim=0)
+            #     loss_mask = torch.cat([t['ori_'+loss+'_conf'][i] for t, (_, i) in zip(targets, indices) if loss in t], dim=0)
+            #     src = src / self.j2ds_norm_scale
+            #     # target = target / self.j2ds_norm_scale
+            #     # Use 45 smpl joints
+            #     src = src[:,:24,:]
+            #     target = target[:,:24,:]
+            #     loss_mask = loss_mask[:,:24].unsqueeze(-1).repeat(1,1,2)
+            # else:
             src = src / self.j2ds_norm_scale
             target = target / self.j2ds_norm_scale
             # Need to exclude invalid kpts in 2d datasets
@@ -1199,6 +1211,8 @@ class SetCriterion_SATPR_IMG(nn.Module):
         #         from utils.visualization import tensor_to_BGR, pad_img
         #         import numpy as np
         #         import cv2
+        #         src = src * loss_mask
+        #         target = target * loss_mask
         #         img = np.ascontiguousarray(tensor_to_BGR(unNormalize(outputs['img'][0]).cpu()))
         #         for idx in range(len(src)):
         #             for j, (x, y) in enumerate(src[idx].detach().cpu().numpy() * self.j2ds_norm_scale):
@@ -1213,7 +1227,7 @@ class SetCriterion_SATPR_IMG(nn.Module):
         #         cv2.imwrite("kp2d2.png", img)
         #         img = np.ascontiguousarray(tensor_to_BGR(unNormalize(outputs['img'][0]).cpu()))
         #         cv2.imwrite("kp2d2_img.png", img)
-        #         # import pdb; pdb.set_trace()
+        #         import pdb; pdb.set_trace()
         # if loss == 'verts':
         #     import numpy as np
         #     from utils.visualization import vis_meshes_img, get_colors_rgb
@@ -1361,7 +1375,10 @@ class SetCriterion_SATPR_IMG(nn.Module):
             'scale_map': self.loss_scale_map,       
         }
         # assert loss in loss_map, f'do you really want to compute {loss} loss?'
-        return loss_map[loss](loss, outputs, targets, indices, num_instances, **kwargs)
+        if len(indices) == 0 and loss != 'scale_map':
+            return {loss: torch.zeros(1, dtype=torch.float32, device=self.device)}
+        else:
+            return loss_map[loss](loss, outputs, targets, indices, num_instances, **kwargs)
 
 
     def get_valid_instances(self, targets):

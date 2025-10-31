@@ -84,15 +84,18 @@ class HungarianMatcher(nn.Module):
         mean_dist = (all_dist * tgt_kpts_mask[None,:,:]).sum(-1) / tgt_kpts_vis_cnt[None,:]
         cost_kpts = mean_dist
 
-        # Compute the giou cost betwen boxes
-        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
-        C = self.cost_conf*cost_conf + self.cost_kpts*cost_kpts + self.cost_bbox * cost_bbox + self.cost_giou * cost_giou
-        C = C.view(bs, num_queries, -1).cpu()
-        C = torch.nan_to_num(C, nan=1e12, posinf=1e12, neginf=1e12)
+        try:
+            # Compute the giou cost betwen boxes
+            cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
+            C = self.cost_conf*cost_conf + self.cost_kpts*cost_kpts + self.cost_bbox * cost_bbox + self.cost_giou * cost_giou
+            C = C.view(bs, num_queries, -1).cpu()
 
-        sizes = [len(v["boxes"]) for v in targets]
-        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
-        return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
+            sizes = [len(v["boxes"]) for v in targets]
+            indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
+            return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
+        except:
+            return []
+        # return []
 
 
 def build_matcher(args):
