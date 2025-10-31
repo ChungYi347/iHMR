@@ -787,6 +787,44 @@ class SetCriterion_SATPR(nn.Module):
 
         return losses
 
+    def loss_next_boxes(self, loss, outputs, targets, indices, num_instances, **kwargs):
+        """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
+           targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
+           The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
+        """
+        # assert 'pred_boxes' in outputs
+        # assert loss == 'boxes'
+        # idx = self._get_src_permutation_idx(indices)
+        # valid_idx = torch.where(torch.cat([torch.ones(len(i), dtype=bool, device = self.device)*(loss in t) for t, (_, i) in zip(targets, indices)]))[0]
+        
+        # if len(valid_idx) == 0:
+        #     return {loss: torch.tensor(0.).to(self.device)}
+
+        if outputs['next_bbox'] == None:
+            return {'next_bbox': torch.tensor(0.).to(self.device), 'next_giou': torch.tensor(0.).to(self.device)}
+        
+        src_boxes = outputs['next_bbox'][0]
+        target_boxes = targets[0]['boxes']
+
+        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
+
+        losses = {}
+        losses['next_bbox'] = loss_bbox.sum() / num_instances
+
+        loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
+            box_ops.box_cxcywh_to_xyxy(src_boxes),
+            box_ops.box_cxcywh_to_xyxy(target_boxes)))
+        losses['next_giou'] = loss_giou.sum() / num_instances
+
+        # # calculate the x,y and h,w loss
+        # with torch.no_grad():
+        #     losses['loss_xy'] = loss_bbox[..., :2].sum() / num_boxes
+        #     losses['loss_hw'] = loss_bbox[..., 2:].sum() / num_boxes
+
+
+        return losses
+        
+
     # For computing ['boxes', 'poses', 'betas', 'j3ds', 'j2ds'] losses
     def loss_L1(self, loss, outputs, targets, indices, num_instances, **kwargs):
         idx = self._get_src_permutation_idx(indices)
@@ -933,9 +971,11 @@ class SetCriterion_SATPR(nn.Module):
             'j2ds': self.loss_L1,
             'depths': self.loss_normalized_depths,
             'scale_map': self.loss_scale_map,       
+            # 'next_pred_boxes': self.loss_next_boxes,
         }
-        # assert loss in loss_map, f'do you really want to compute {loss} loss?'
-        return loss_map[loss](loss, outputs, targets, indices, num_instances, **kwargs)
+        if loss != "next_pred_boxes":
+            # assert loss in loss_map, f'do you really want to compute {loss} loss?'
+            return loss_map[loss](loss, outputs, targets, indices, num_instances, **kwargs)
 
 
     def get_valid_instances(self, targets):
@@ -974,7 +1014,7 @@ class SetCriterion_SATPR(nn.Module):
             if v is None:
                 out[k] = None
                 continue
-            if k == 'pred_intrinsics' or k == 'dn_meta':
+            if k == 'pred_intrinsics' or k == 'dn_meta' or k == 'next_bbox':
                 out[k] = v
                 continue
             out[k] = v[:, q_start:q_end, ...]
@@ -1036,7 +1076,7 @@ class SetCriterion_SATPR(nn.Module):
 
                 l_dict = {}
                 for loss in self.losses:
-                    if loss == 'scale_map':
+                    if loss == 'scale_map' or loss == 'next_pred_boxes':
                         continue
                     l_dict.update(self.get_loss(loss, output_known, targets, dn_pos_idx, num_valid_instances[loss]*scalar, is_dn=True))
                 l_dict = {k + f'_dn': v for k, v in l_dict.items()}
@@ -1046,26 +1086,29 @@ class SetCriterion_SATPR(nn.Module):
             
             for loss in self.losses:           
                 # losses.update(self.get_loss(loss, outputs, targets, indices, num_valid_instances[loss]))
+                if loss == 'next_pred_boxes':
+                    continue
                 losses.update(self.get_loss(loss, outputs_ref, targets, ref_indices, num_valid_instances[loss]))
                 if loss == 'scale_map':
                     continue
-                # pr_loss = self.get_loss(loss, outputs_pr, targets, pr_indices, num_valid_instances[loss])
-                # pr_loss = {f'{k}_pr': v for k, v in pr_loss.items()}
-                # losses.update(pr_loss)
+                pr_loss = self.get_loss(loss, outputs_pr, targets, pr_indices, num_valid_instances[loss])
+                pr_loss = {f'{k}_pr': v for k, v in pr_loss.items()}
+                losses.update(pr_loss)
+            losses.update(self.loss_next_boxes('boxes', outputs_ref, targets, ref_indices, num_valid_instances['boxes']))
             
             # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
             if 'aux_outputs' in outputs:
                 for i, aux_outputs in enumerate(outputs['aux_outputs']):
                     indices = self.matcher(aux_outputs, targets)
                     for loss in self.losses:
-                        if loss == 'scale_map':
+                        if loss == 'scale_map' or loss == 'next_pred_boxes':
                             continue
                         l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_valid_instances[loss])
                         l_dict = {f'{k}.{i}': v for k, v in l_dict.items()}
                         losses.update(l_dict)
 
                     if 'dn_meta' in outputs:
-                        if loss == 'scale_map':
+                        if loss == 'scale_map' or loss == 'next_pred_boxes':
                             continue
                         aux_outputs_known = output_known['aux_outputs'][i]
                         l_dict={}
@@ -1073,6 +1116,7 @@ class SetCriterion_SATPR(nn.Module):
                             l_dict.update(self.get_loss(loss, aux_outputs_known, targets, dn_pos_idx, num_valid_instances[loss]*scalar, is_dn=True))
                         l_dict = {k + f'_dn.{i}': v for k, v in l_dict.items()}
                         losses.update(l_dict)
+            
             _losses.append(losses)
 
             # if 'scale_map' in outputs:
@@ -1375,7 +1419,7 @@ class SetCriterion_SATPR_IMG(nn.Module):
             'scale_map': self.loss_scale_map,       
         }
         # assert loss in loss_map, f'do you really want to compute {loss} loss?'
-        if len(indices) == 0 and loss != 'scale_map':
+        if len(indices) == 0:
             return {loss: torch.zeros(1, dtype=torch.float32, device=self.device)}
         else:
             return loss_map[loss](loss, outputs, targets, indices, num_instances, **kwargs)
