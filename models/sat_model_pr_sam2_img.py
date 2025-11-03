@@ -1087,6 +1087,7 @@ class ImageModel(nn.Module):
 
 
         bs = len(targets)
+        device = samples[0].device
 
         # get cam_intrinsics
         img_size = torch.stack([t['img_size'].flip(0) for t in targets])
@@ -1111,9 +1112,35 @@ class ImageModel(nn.Module):
             if self.training:
                 _boxes = [t['boxes'] for t in targets]
             elif (hasattr(self, 'tracker') and len(self.tracker.tracks) != 0):
+                # _boxes = [box_xyxy_to_cxcywh((v['box'] * 0.5 + v['prev_box'] * 0.5) / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
                 _boxes = [box_xyxy_to_cxcywh(v['box'] / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
+                # prev_boxes = [box_xyxy_to_cxcywh(v['prev_box'] / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
+                
+
                 # _boxes = [box_xyxy_to_cxcywh(v['kf'].get_xyxy() / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
                 # _boxes = [t['boxes'] for t in targets]
+
+            if self.training:
+                box_noise_scale = 0.2
+                known_bboxs = torch.cat(_boxes)
+                known_bbox_ = torch.zeros_like(known_bboxs)
+                known_bbox_[:, :2] = known_bboxs[:, :2] - known_bboxs[:, 2:] / 2
+                known_bbox_[:, 2:] = known_bboxs[:, :2] + known_bboxs[:, 2:] / 2
+
+                diff = torch.zeros_like(known_bboxs)
+                diff[:, :2] = known_bboxs[:, 2:] / 2
+                diff[:, 2:] = known_bboxs[:, 2:] / 2
+
+                rand_sign = torch.randint_like(known_bboxs, low=0, high=2, dtype=torch.float32) * 2.0 - 1.0
+                rand_part = torch.rand_like(known_bboxs)
+                rand_part *= rand_sign
+                known_bbox_ = known_bbox_ + torch.mul(rand_part,
+                                                        diff).to(device=device) * box_noise_scale
+                known_bbox_ = known_bbox_.clamp(min=0.0, max=1.0)
+                known_bbox_expand = torch.zeros_like(known_bboxs)
+                known_bbox_expand[:, :2] = (known_bbox_[:, :2] + known_bbox_[:, 2:]) / 2
+                known_bbox_expand[:, 2:] = known_bbox_[:, 2:] - known_bbox_[:, :2]
+                _boxes = [known_bbox_expand]
             
             if len(_boxes) != 0:
                 max_len = max(b.shape[0] for b in _boxes)
@@ -1131,6 +1158,22 @@ class ImageModel(nn.Module):
                 if (hasattr(self, 'tracker') and len(self.tracker.tracks) != 0):
                     pr_tgt = pr_tgt[:, 0, :][None]
                     pr_points = pr_points[:, 0, :][None]
+        elif hasattr(self, 'infer_joint') and self.infer_joint:
+            _boxes = [t['boxes'] for t in targets]
+            if len(_boxes) != 0:
+                max_len = max(b.shape[0] for b in _boxes)
+                boxes = []
+                for box in _boxes:
+                    num_boxes = box.shape[0] 
+                    num_repeats = (max_len + num_boxes - 1) // num_boxes 
+                    repeated_tensor = box.repeat(num_repeats, 1)
+                    sliced_tensor = repeated_tensor[:max_len]
+                    boxes.append(sliced_tensor)
+                pr_points = inverse_sigmoid(torch.stack(boxes)).to(embedweight.dtype)
+
+                attn_weights = self.prompt_cross_attn(q=pr_points, k=embedweight, v=embedweight)[:, 0, :, :]
+                pr_tgt = torch.matmul(attn_weights, tgt)
+                
         # print(len(_boxes))
 
         # pr_tgt, pr_points, pr_attn_mask, prompt_dn_meta =\
@@ -1283,6 +1326,7 @@ class ImageModel(nn.Module):
         outputs_j3ds = []
         outputs_j2ds = []
         outputs_depths = []
+        outputs_querys = []
 
         # shape of hs: (lvl, bs, num_queries, dim)
         outputs_pose_6d = self.mean_pose.view(1, 1, -1)
@@ -1310,6 +1354,7 @@ class ImageModel(nn.Module):
                                     cam_intrinsics = cam_intrinsics,
                                     detach_j3ds = detach_j3ds)
                 
+                outputs_querys.append(hs[lvl])
                 outputs_poses.append(outputs_pose)
                 outputs_shapes.append(outputs_shape)
                 outputs_confs.append(outputs_conf)
@@ -1327,7 +1372,7 @@ class ImageModel(nn.Module):
         pred_j3ds = torch.stack(outputs_j3ds)
         pred_j2ds = torch.stack(outputs_j2ds)
         pred_depths = torch.stack(outputs_depths)
-
+        pred_querys = torch.stack(outputs_querys)
 
 
         if self.training > 0 and self.use_dn:
@@ -1359,8 +1404,10 @@ class ImageModel(nn.Module):
                'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
                'pred_depths': pred_depths[-1], 'pred_transl': pred_transl,
                'img': samples}
+        # Posetrack 0.1 and bedlam 0.05
         j2d_boxes = j2ds_to_bboxes_xywh(out['pred_j2ds'][-1], 0.1)[None]
         out['pred_j2d_boxes'] = j2d_boxes
+        out['pred_querys'] = pred_querys[-1]
         
         if self.aux_loss and self.training:
             out['aux_outputs'] = self._set_aux_loss(pred_poses, pred_betas,
@@ -1386,11 +1433,14 @@ class ImageModel(nn.Module):
             for b in range(B):
                 confs = out['pred_confs'][b].squeeze(-1) if out['pred_confs'][b].dim()>1 else out['pred_confs'][b]  # [Q]
                 
-                # boxes = out['pred_boxes'][b] * self.input_size  # [Q,4]
+                # if hasattr(self.tracker, 'is_add_new') not self.tracker.is_add_new:
+                #     boxes = out['pred_boxes'][b] * self.input_size  # [Q,4]
+                # else:
                 boxes = out['pred_j2d_boxes'][b]
                 kp2ds = out['pred_j2ds'][b]
                 Q = boxes.size(0)
                 qidx = torch.arange(Q, device=boxes.device)
+                querys = out['pred_querys']
 
 
                 # image_np = samples[0].detach().to("cpu").permute(1, 2, 0).numpy()
@@ -1412,7 +1462,15 @@ class ImageModel(nn.Module):
                 #     )
 
                 # active_ids, id2qidx, id2origin = self.tracker.update(kp2ds, boxes, confs, qidx)
-                active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx)
+                if hasattr(self.tracker, 'is_add_new') and not self.tracker.is_add_new:
+                    gt_boxes = box_cxcywh_to_xyxy(targets[0]['boxes'])
+                    gt_boxes[:, 0] = gt_boxes[:, 0] * self.input_size
+                    gt_boxes[:, 1] = gt_boxes[:, 1] * self.input_size
+                    gt_boxes[:, 2] = gt_boxes[:, 2] * self.input_size
+                    gt_boxes[:, 3] = gt_boxes[:, 3] * self.input_size
+                    active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=querys, gt_boxes=gt_boxes)
+                else:
+                    active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=querys)
 
                 if len(id2qidx) == 0:
                     keep_indices = torch.empty((0,), dtype=torch.long, device=boxes.device)
