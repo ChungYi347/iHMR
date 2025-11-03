@@ -1122,25 +1122,28 @@ class ImageModel(nn.Module):
 
             if self.training:
                 box_noise_scale = 0.2
-                known_bboxs = torch.cat(_boxes)
-                known_bbox_ = torch.zeros_like(known_bboxs)
-                known_bbox_[:, :2] = known_bboxs[:, :2] - known_bboxs[:, 2:] / 2
-                known_bbox_[:, 2:] = known_bboxs[:, :2] + known_bboxs[:, 2:] / 2
+                __boxes = []
+                for pr_boxes in _boxes:
+                    known_bboxs = pr_boxes
+                    known_bbox_ = torch.zeros_like(known_bboxs)
+                    known_bbox_[:, :2] = known_bboxs[:, :2] - known_bboxs[:, 2:] / 2
+                    known_bbox_[:, 2:] = known_bboxs[:, :2] + known_bboxs[:, 2:] / 2
 
-                diff = torch.zeros_like(known_bboxs)
-                diff[:, :2] = known_bboxs[:, 2:] / 2
-                diff[:, 2:] = known_bboxs[:, 2:] / 2
+                    diff = torch.zeros_like(known_bboxs)
+                    diff[:, :2] = known_bboxs[:, 2:] / 2
+                    diff[:, 2:] = known_bboxs[:, 2:] / 2
 
-                rand_sign = torch.randint_like(known_bboxs, low=0, high=2, dtype=torch.float32) * 2.0 - 1.0
-                rand_part = torch.rand_like(known_bboxs)
-                rand_part *= rand_sign
-                known_bbox_ = known_bbox_ + torch.mul(rand_part,
-                                                        diff).to(device=device) * box_noise_scale
-                known_bbox_ = known_bbox_.clamp(min=0.0, max=1.0)
-                known_bbox_expand = torch.zeros_like(known_bboxs)
-                known_bbox_expand[:, :2] = (known_bbox_[:, :2] + known_bbox_[:, 2:]) / 2
-                known_bbox_expand[:, 2:] = known_bbox_[:, 2:] - known_bbox_[:, :2]
-                _boxes = [known_bbox_expand]
+                    rand_sign = torch.randint_like(known_bboxs, low=0, high=2, dtype=torch.float32) * 2.0 - 1.0
+                    rand_part = torch.rand_like(known_bboxs)
+                    rand_part *= rand_sign
+                    known_bbox_ = known_bbox_ + torch.mul(rand_part,
+                                                            diff).to(device=device) * box_noise_scale
+                    known_bbox_ = known_bbox_.clamp(min=0.0, max=1.0)
+                    known_bbox_expand = torch.zeros_like(known_bboxs)
+                    known_bbox_expand[:, :2] = (known_bbox_[:, :2] + known_bbox_[:, 2:]) / 2
+                    known_bbox_expand[:, 2:] = known_bbox_[:, 2:] - known_bbox_[:, :2]
+                    __boxes.append(known_bbox_expand)
+                _boxes = __boxes
             
             if len(_boxes) != 0:
                 max_len = max(b.shape[0] for b in _boxes)
