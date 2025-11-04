@@ -808,6 +808,7 @@ class SetCriterion_SATPR(nn.Module):
 
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
 
+        num_instances = targets[0]['pnum']
         losses = {}
         losses['next_bbox'] = loss_bbox.sum() / num_instances
 
@@ -1014,7 +1015,7 @@ class SetCriterion_SATPR(nn.Module):
             if v is None:
                 out[k] = None
                 continue
-            if k == 'pred_intrinsics' or k == 'dn_meta' or k == 'next_bbox':
+            if k == 'pred_intrinsics' or k == 'dn_meta' or k == 'next_bbox' or k == 'kept_indices':
                 out[k] = v
                 continue
             out[k] = v[:, q_start:q_end, ...]
@@ -1094,7 +1095,7 @@ class SetCriterion_SATPR(nn.Module):
                 pr_loss = self.get_loss(loss, outputs_pr, targets, pr_indices, num_valid_instances[loss])
                 pr_loss = {f'{k}_pr': v for k, v in pr_loss.items()}
                 losses.update(pr_loss)
-            losses.update(self.loss_next_boxes('boxes', outputs_ref, targets, ref_indices, num_valid_instances['boxes']))
+            # losses.update(self.loss_next_boxes('confs', outputs_ref, targets, ref_indices, num_valid_instances['confs']))
             
             # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
             if 'aux_outputs' in outputs:
@@ -1461,7 +1462,7 @@ class SetCriterion_SATPR_IMG(nn.Module):
             if v is None:
                 out[k] = None
                 continue
-            if k == 'pred_intrinsics' or k == 'dn_meta' or k == 'pr_dn_meta' or k == 'img':
+            if k == 'pred_intrinsics' or k == 'dn_meta' or k == 'pr_dn_meta' or k == 'img' or k == 'kept_indices':
                 out[k] = v
                 continue
             out[k] = v[:, q_start:q_end, ...]
@@ -1491,8 +1492,10 @@ class SetCriterion_SATPR_IMG(nn.Module):
         outputs_ref['enc_outputs'] = outputs['enc_outputs']
         # # Retrieve the matching between the outputs of the last layer and the targets
         # pr_indices = self.matcher(outputs_pr, targets)
-        pr_cnt = [target['pnum'] for target in targets]
-        pr_indices = [(torch.arange(s), torch.arange(s)) for s in pr_cnt]
+        # pr_cnt = [target['pnum'] for target in targets]
+        # pr_indices = [(torch.arange(s), torch.arange(s)) for s in pr_cnt]
+        kept_indices = outputs['kept_indices']
+        pr_indices = [(torch.arange(len(idx)), idx) for idx in kept_indices]
         ref_indices = self.matcher(outputs_ref, targets)
         self.device = outputs['pred_poses'].device
         num_valid_instances = self.get_valid_instances(targets)

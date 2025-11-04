@@ -1111,6 +1111,17 @@ class ImageModel(nn.Module):
         if self.training or (hasattr(self, 'tracker') and len(self.tracker.tracks) != 0):
             if self.training:
                 _boxes = [t['boxes'] for t in targets]
+                _removed_boxes, _kept_indices = [], []
+                for boxes in _boxes:
+                    n = len(boxes)
+                    keep_idx = torch.tensor(
+                        sorted(random.sample(range(n), k=max(1, int(n * (1 - random.uniform(0.1, 0.7)))))),
+                        dtype=torch.long
+                    )
+                    _removed_boxes.append(boxes[keep_idx])
+                    _kept_indices.append(keep_idx)
+                _boxes = _removed_boxes
+
             elif (hasattr(self, 'tracker') and len(self.tracker.tracks) != 0):
                 # _boxes = [box_xyxy_to_cxcywh((v['box'] * 0.5 + v['prev_box'] * 0.5) / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
                 _boxes = [box_xyxy_to_cxcywh(v['box'] / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
@@ -1400,13 +1411,38 @@ class ImageModel(nn.Module):
         #                         pred_verts, pred_transl,
         #                         prompt_dn_meta, self.aux_loss, self._set_aux_loss)
 
+        # import matplotlib.pyplot as plt
+        # x_sorted, _ = torch.sort(pred_confs[-1].squeeze(), descending=True)
+
+        # def knee_threshold(scores: torch.Tensor):
+        #     s, _ = torch.sort(scores, descending=True)
+        #     N = len(s)
+        #     x = torch.linspace(0, 1, N, device=s.device)
+        #     y = (s - s.min()) / (s.max() - s.min())  # normalize
+        #     line = y[0] + (y[-1] - y[0]) * x
+        #     diff = line - y                          
+        #     i_star = torch.argmax(diff).item()
+        #     tau = s[i_star].item()
+        #     return tau, i_star
+
+        # tau, i_star = knee_threshold(x_sorted)
+        # # if self.tracker.frame_id != 0:
+        # #     self.tracker.conf_thresh = tau
+        # # else:
+        # #     self.tracker.conf_thresh = tau + 0.2
+
+        # plt.figure(figsize=(6,4))
+        # plt.plot(range(len(x_sorted.squeeze().cpu().numpy())), x_sorted.squeeze().cpu().numpy(), marker='o', markersize=3, linewidth=1)
+        # plt.axvline(i_star, color='red', linestyle='--', label=f'knee index = {i_star}')
+        # plt.axhline(tau, color='orange', linestyle='--', label=f'tau = {tau:.3f}')
+        # plt.savefig(f'linecharts/thresholding_{self.tracker.frame_id}.jpg')
 
         out = {'pred_poses': pred_poses[-1], 'pred_betas': pred_betas[-1],
                 'pred_boxes': pred_boxes[-1], 'pred_confs': pred_confs[-1], 
                'pred_j3ds': pred_j3ds[-1], 'pred_j2ds': pred_j2ds[-1],
                'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
                'pred_depths': pred_depths[-1], 'pred_transl': pred_transl,
-               'img': samples}
+               'img': samples, 'kept_indices': _kept_indices}
         # Posetrack 0.1 and bedlam 0.05
         j2d_boxes = j2ds_to_bboxes_xywh(out['pred_j2ds'][-1], 0.1)[None]
         out['pred_j2d_boxes'] = j2d_boxes
