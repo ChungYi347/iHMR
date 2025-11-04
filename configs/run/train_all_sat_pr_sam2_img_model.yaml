@@ -1,9 +1,10 @@
-wandb_logging: true
+wandb_logging: false 
 seed: 42
 model: default
 
 pretrain: True
 pretrain_path: './weights/sat_hmr/sat_644.pth'
+# pretrain_path: 'outputs/ckpts/train_all_sat_pr_sam2_img_model/epoch_4_step_12854/pytorch_model.bin'
 resume: True # Resume from the latest ckpt
 
 video_model: False
@@ -43,6 +44,7 @@ weight_dict: {'confs':4.,'poses':5.,'betas':3.,'boxes':2., 'giou':2., 'j3ds':8.,
 detach_j3ds: False
 
 # train aug
+aug: false
 aug_cfg:
   rot_range: [-15, 15]
   scale_range: [0.8, 1.8]
@@ -53,13 +55,19 @@ aug_cfg:
 # train_datasets_used: ['agora','coco','3dpw']      # ['agora','bedlam','bedlam']
 # train_datasets_split: ['train','train','train']  # ['train','train_6fps','validation_6fps']
 
-train_datasets_used: ['posetrack','agora','bedlam','coco','3dpw']      # ['agora','bedlam','bedlam']
-train_datasets_split: ['train','train','train_6fps','train','train']  # ['train','train_6fps','validation_6fps']
-sampling_weights: [1.0, 1.0, 0.2, 1.0, 1.0]
+# train_datasets_used: ['posetrack','agora','bedlam','coco','3dpw']      # ['agora','bedlam','bedlam']
+# train_datasets_split: ['train','train','train_6fps','train','train']  # ['train','train_6fps','validation_6fps']
+# sampling_weights: [1.0, 1.0, 0.1, 1.0, 1.0]
 
 # train_datasets_used: ['posetrack']      # ['agora','bedlam','bedlam']
 # train_datasets_split: ['train']  # ['train','train_6fps','validation_6fps']
-# sampling_weights: [0.01]
+# sampling_weights: [1.0]
+train_datasets_used: ['posetrack','agora','bedlam','coco','3dpw']      # ['agora','bedlam','bedlam']
+train_datasets_split: ['train','train','train_6fps','train','train']  # ['train','train_6fps','validation_6fps']
+sampling_weights: [1.0, 1.0, 0.1, 1.0, 1.0]
+# train_datasets_used: ['posetrack','bedlam']      # ['agora','bedlam','bedlam']
+# train_datasets_split: ['train','train_6fps']  # ['train','train_6fps','validation_6fps']
+# sampling_weights: [1.0, 0.2]
 train_batch_size: 6
 train_num_workers: 8
 # train_batch_size: 2
