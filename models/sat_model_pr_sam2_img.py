@@ -1442,7 +1442,9 @@ class ImageModel(nn.Module):
                'pred_j3ds': pred_j3ds[-1], 'pred_j2ds': pred_j2ds[-1],
                'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
                'pred_depths': pred_depths[-1], 'pred_transl': pred_transl,
-               'img': samples, 'kept_indices': _kept_indices}
+               'img': samples}
+        if self.training:
+            out['kept_indices'] = _kept_indices
         # Posetrack 0.1 and bedlam 0.05
         j2d_boxes = j2ds_to_bboxes_xywh(out['pred_j2ds'][-1], 0.1)[None]
         out['pred_j2d_boxes'] = j2d_boxes
