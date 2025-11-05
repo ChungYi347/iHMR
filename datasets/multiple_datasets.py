@@ -12,12 +12,14 @@ from .h36m import H36M
 from .posetrack import PoseTrack
 from .pw3d_video import PW3DVideo
 from .posetrack_video import PoseTrackVideo
+from .bedlam_video import BEDLAMVideo
 
 datasets_dict = {'bedlam': BEDLAM, 'agora': AGORA, 
                  'crowdpose': CROWDPOSE, 'mpii': MPII, 
                  'coco': COCO, '3dpw': PW3D, 'h36m': H36M,
                  'posetrack': PoseTrack,
-                 '3dpw_video': PW3DVideo, 'posetrack_video': PoseTrackVideo}
+                 '3dpw_video': PW3DVideo, 'posetrack_video': PoseTrackVideo,
+                 'bedlam_video': BEDLAMVideo}
 
 class MultipleDatasets(Dataset):
     # def __init__(self, datasets_used, datasets_split = None, make_same_len = False, **kwargs):

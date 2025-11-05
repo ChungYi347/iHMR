@@ -5,11 +5,23 @@ import os
 from configs.paths import dataset_root
 import copy
 from tqdm import tqdm
-from .base import BASE
+from .base_video import BASEVideo
+import pickle
+import random
 
-class BEDLAM(BASE):
-    def __init__(self, split='train_6fps', target_folders=None, **kwargs):
-        super(BEDLAM, self).__init__(**kwargs)
+random.seed(42)
+
+
+class BEDLAMVideo(BASEVideo):
+    def __init__(self, split='train_6fps',**kwargs):
+        self.sample_idx = pickle.load(open("data/video_index/bedlam_train_idx.pkl", "rb"))
+        keys = list(self.sample_idx.keys())
+        random.shuffle(keys)
+
+        cut = int(len(keys) * 0.2)
+        self.sample_idx = {k: self.sample_idx[k] for k in keys[:cut]}
+
+        super(BEDLAMVideo, self).__init__(**kwargs)
         assert split in ['train_1fps', 'train_6fps','validation_6fps']
         self.ds_name = 'bedlam'
         self.dataset_path = os.path.join(dataset_root,'bedlam')
@@ -17,34 +29,17 @@ class BEDLAM(BASE):
         self.annots = np.load(annots_path, allow_pickle=True)['annots'][()]
         self.img_names = list(self.annots.keys())
         self.split = 'train' if 'train' in split else 'validation'
-
-        if target_folders is not None:
-            self.target_folders = target_folders
-            filtered = []
-            for name in self.img_names:
-                # if 'seq_000022' not in name:
-                #     continue
-                # print(name)
-                if '/'.join(name.split('/')[:-1]) in target_folders:
-                    filtered.append(name)
-            self.img_names = filtered
-            self.img_names.sort()
-            print(f"[BEDLAM] Using {len(self.img_names)} images from folders: {target_folders}")
-
         
     def __len__(self):
-        return len(self.img_names)
+        return self.total_length
     
-    def get_raw_data(self, idx):
+    def get_raw_data(self, img_name):
 
-        img_id = idx%len(self.img_names)
-        img_name = self.img_names[img_id]
+        # img_id = idx%len(self.img_names)
+        # img_name = self.img_names[img_id]
         
         annots = copy.deepcopy(self.annots[img_name])
         img_path = os.path.join(self.dataset_path,self.split,img_name)
-        # Just my condition
-        if self.split == 'validation':
-            img_path = img_path.replace('validation', 'train')
 
         cam_intrinsics = torch.from_numpy(annots['cam_int']).unsqueeze(0)
         cam_rot = torch.from_numpy(np.stack(annots['cam_rot']))

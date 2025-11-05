@@ -74,7 +74,8 @@ class BASE(Dataset):
                            'transl', 'verts', 
                         #    'j3ds', 'j2ds', 'j2ds_mask', 'padd_j2ds',
                            'j3ds', 'j2ds', 'j2ds_mask',
-                            'depths', 'focals', 'genders']
+                            'depths', 'focals', 'genders',
+                            'ori_j2ds', 'ori_j2ds_conf']
 
         if self.backbone == "vitb":
             z_depth = math.ceil(math.log2(self.input_size//28))
@@ -401,8 +402,6 @@ class BASE(Dataset):
             meta_data['scale_map'] = scale_map_z
             meta_data['scale_map_pos'] = {'pos_y': pos_y, 'pos_x': pos_x}
             meta_data['scale_map_hw'] = scale_map.shape[:2]
-
-
 
         return img, meta_data
 

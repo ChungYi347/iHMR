@@ -20,6 +20,7 @@ from configs.paths import smpl_model_path
 from models.human_models import SMPL_Layer, smpl_gendered
 # from models.smpl_family import SMPLX, SMPL
 from models.geometry import axis_angle_to_matrix
+from models.matcher import align_object_order_across_frames
 
 # SMPLX_MODEL_DIR = 'weights/body_models/smplx'
 # SMPL_MODEL_DIR = 'weights/body_models/smpl'
@@ -418,6 +419,8 @@ class BASEVideo(Dataset):
         _meta_data = []
         _norm_img = []
         aug_dict = None
+        if index > len(self.video_idx_to_name) - 1:
+            index = 0
         for img_idx, img_name in enumerate(self.video_idx_to_name[index]):
             raw_data = self.get_raw_data(img_name)
             
@@ -510,6 +513,16 @@ class BASEVideo(Dataset):
             
             _meta_data.append([meta_data])
             _norm_img.append(norm_img)
+
+        pnums = [mdata[0]['pnum'] for mdata in _meta_data]
+        if len(set(pnums)) != 1:
+            return self.__getitem__(index + 1)
+        # print(pnums)
+
+        # align_object_order_across_frames(_meta_data, j2ds_norm_scale=518.0, inplace=True)
+        # print(_meta_data[0][0]['boxes'])
+        # print(_meta_data[1][0]['boxes'])
+        # print(_meta_data[2][0]['boxes'])
 
         # return norm_img, meta_data, mask
         return _norm_img, _meta_data

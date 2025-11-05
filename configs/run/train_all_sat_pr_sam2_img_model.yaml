@@ -5,12 +5,13 @@ model: default
 pretrain: True
 pretrain_path: './weights/sat_hmr/sat_644.pth'
 # pretrain_path: 'outputs/ckpts/train_all_sat_pr_sam2_img_model/epoch_4_step_12854/pytorch_model.bin'
+# pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_all_sat_pr_sam2_test/epoch_1_step_23685/pytorch_model.bin'
 resume: True # Resume from the latest ckpt
 
 video_model: False
 
 num_epochs: 60
-save_and_eval_epoch: 5
+save_and_eval_epoch: 50
 least_eval_epoch: 1
 sat_gt_epoch: 1
 # lr

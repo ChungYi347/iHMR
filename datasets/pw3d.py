@@ -8,7 +8,7 @@ from .base import BASE
 
 
 class PW3D(BASE):
-    def __init__(self, split='train', **kwargs):
+    def __init__(self, split='train', target_folders=None, **kwargs):
         super(PW3D, self).__init__(**kwargs)
         assert split in ['train','test']
 
@@ -18,6 +18,25 @@ class PW3D(BASE):
         annots_path = os.path.join(self.dataset_path,'annots_smpl_{}_genders.npz'.format(split))
         self.annots = np.load(annots_path, allow_pickle=True)['annots'][()]
         self.img_names = list(self.annots.keys())
+
+        if target_folders is not None:
+            self.target_folders = target_folders
+            filtered = []
+            # input_dir
+            # pw3d_folder_path = "./data/datasets/3dpw/imageFiles/" + target_folders.split('/')[-1]
+            # files = [target_folders.split('/')[-1] + "/" + img_file_path for img_file_path in os.listdir(target_folders)]
+            # max_num = max([int(img_file_path.split('/')[-1].replace('image_', '').replace('.jpg',  '')) for img_file_path in os.listdir(target_folders)])
+            for name in self.img_names:
+                if name.split('/')[1] in target_folders:
+                    filtered.append(name)
+                    # # import pdb; pdb.set_trace()
+                    # if int(name.split('/')[-1].replace('image_', '').replace('.jpg',  '')) <= max_num:
+                    #     filtered.append(name)
+                    # # if name.replace('imageFiles/', '') in files:
+                    # #     filtered.append(name)
+            self.img_names = filtered
+            self.img_names.sort()
+            print(f"[PW3D] Using {len(self.img_names)} images from folders: {target_folders}")
         
     def __len__(self):
         return len(self.img_names)

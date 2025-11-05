@@ -1124,12 +1124,15 @@ class ImageModel(nn.Module):
 
             elif (hasattr(self, 'tracker') and len(self.tracker.tracks) != 0):
                 # _boxes = [box_xyxy_to_cxcywh((v['box'] * 0.5 + v['prev_box'] * 0.5) / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
-                _boxes = [box_xyxy_to_cxcywh(v['box'] / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
+                # _boxes = [box_xyxy_to_cxcywh(box_cxcywh_to_xyxy(v['box'] / self.input_size)) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
                 # prev_boxes = [box_xyxy_to_cxcywh(v['prev_box'] / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
                 
-
-                # _boxes = [box_xyxy_to_cxcywh(v['kf'].get_xyxy() / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
+                # _boxes = [box_cxcywh_to_xyxy(v['kf'].get_xyxy() / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
+                # _boxes = [box_cxcywh_to_xyxy(v['box'] / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
+                # import pdb; pdb.set_trace()
                 # _boxes = [t['boxes'] for t in targets]
+                _boxes = [box_xyxy_to_cxcywh(v['box'] / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
+                
 
             if self.training:
                 box_noise_scale = 0.2
@@ -1433,8 +1436,8 @@ class ImageModel(nn.Module):
 
         # plt.figure(figsize=(6,4))
         # plt.plot(range(len(x_sorted.squeeze().cpu().numpy())), x_sorted.squeeze().cpu().numpy(), marker='o', markersize=3, linewidth=1)
-        # plt.axvline(i_star, color='red', linestyle='--', label=f'knee index = {i_star}')
-        # plt.axhline(tau, color='orange', linestyle='--', label=f'tau = {tau:.3f}')
+        # # plt.axvline(i_star, color='red', linestyle='--', label=f'knee index = {i_star}')
+        # # plt.axhline(tau, color='orange', linestyle='--', label=f'tau = {tau:.3f}')
         # plt.savefig(f'linecharts/thresholding_{self.tracker.frame_id}.jpg')
 
         out = {'pred_poses': pred_poses[-1], 'pred_betas': pred_betas[-1],
@@ -1501,6 +1504,46 @@ class ImageModel(nn.Module):
                 #     _ = self.tracker.init_frame(
                 #         kp2ds[mask], boxes[mask], confs[mask], qidx[mask], nms_iou=0.5
                 #     )
+
+                @torch.no_grad()
+                def auto_thresholds(boxes_xyxy: torch.Tensor, scores: torch.Tensor, max_queries: int = 50):
+                    if boxes_xyxy.numel() == 0:
+                        return 0, 0.55, 0.50
+
+                    # 중심/스케일
+                    cx = (boxes_xyxy[:,0] + boxes_xyxy[:,2]) * 0.5
+                    cy = (boxes_xyxy[:,1] + boxes_xyxy[:,3]) * 0.5
+                    w  = (boxes_xyxy[:,2] - boxes_xyxy[:,0]).clamp(min=1e-6)
+                    h  = (boxes_xyxy[:,3] - boxes_xyxy[:,1]).clamp(min=1e-6)
+                    r  = (0.4 * torch.median(torch.sqrt(w*h))).clamp(min=1.0)   # 반경(픽셀)
+
+                    centers = torch.stack([cx, cy], 1)
+                    order   = torch.argsort(scores, descending=True)            # 점수 높은 것부터
+                    taken   = torch.zeros(len(order), dtype=torch.bool, device=scores.device)
+                    kept    = 0
+
+                    for i in range(len(order)):
+                        if taken[i]: 
+                            continue
+                        kept += 1
+                        d = centers[order] - centers[order[i]]
+                        taken |= (d[:,0]**2 + d[:,1]**2) <= (r*r)               # 반경 내 제거
+
+                    n_people = int(kept)
+                    # 혼잡도(0~1): 사람수 / (용량의 0.8배)
+                    crowd = min(1.0, n_people / max(1, int(0.8*max_queries)))
+
+                    score_thr = 0.55 - 0.20 * crowd   # 0.55→0.35
+                    nms_iou   = 0.50 + 0.30 * crowd   # 0.50→0.80
+                    return n_people, float(score_thr), float(nms_iou)
+
+                thrs_boxes = boxes[confs > self.tracker.conf_thresh] 
+                thrs_confs = confs[confs > self.tracker.conf_thresh]
+                n_people, score_thr, nms_iou = auto_thresholds(thrs_boxes, thrs_confs, max_queries=50)
+                crowd = (self.num_queries - n_people) / (self.num_queries - 10)
+                crowd = torch.clamp(torch.tensor(crowd), 0.0, 1.0)
+                self.crowd = crowd
+                self.tracker.crowd = crowd
 
                 # active_ids, id2qidx, id2origin = self.tracker.update(kp2ds, boxes, confs, qidx)
                 if hasattr(self.tracker, 'is_add_new') and not self.tracker.is_add_new:
@@ -1574,6 +1617,7 @@ class ImageModel(nn.Module):
             out['track_ids']          = keep_track_ids_per_b   
             out['active_ids'] = active_ids
             out['ori_pred_boxes'] = pred_boxes[-1]
+            out['ori_pred_confs'] = pred_confs[-1]
 
         return out
     

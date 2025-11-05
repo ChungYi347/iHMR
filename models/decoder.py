@@ -88,6 +88,14 @@ class TransformerDecoder(nn.Module):
                           self_attn_bias = self_attn_bias)
         return hs, references
 
+    def forward_first_layer(self, memory, memory_lens, tgt, tgt_lens, refpoint_embed, pos_embed, self_attn_mask):
+        self_attn_bias = self.mask2bias(self_attn_mask, batch_size=len(memory_lens))
+        hs, references = self.decoder.forward_first_layer(memory=memory, memory_lens=memory_lens,
+                          tgt=tgt, tgt_lens=tgt_lens,
+                          pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
+                          self_attn_bias = self_attn_bias)
+        return hs, references
+
 
 class XformerDecoder(nn.Module):
     def __init__(self, decoder_layer, num_layers, norm=None, return_intermediate=True, 
@@ -211,6 +219,65 @@ class XformerDecoder(nn.Module):
                 ]
 
         return output.unsqueeze(0)
+    
+    def forward_first_layer(self, memory, memory_lens, tgt, tgt_lens,
+                        pos: Optional[Tensor] = None,
+                        refpoints_unsigmoid: Optional[Tensor] = None,
+                        self_attn_bias=None):
+        B, num_queries = len(tgt_lens), tgt_lens[0]
+        output = tgt
+
+        # initial reference points
+        reference_points = refpoints_unsigmoid.sigmoid()
+        ref_points = [reference_points.view(B, num_queries, self.query_dim)]
+
+        # --- only first layer ---
+        layer = self.layers[0]
+        obj_center = reference_points[:, :self.query_dim]  # [L_tgt, 4]
+
+        # position encoding for query (center + size)
+        xy_embed = position_encoding_xy(obj_center[:, 0], obj_center[:, 1], self.d_model)
+        wh_embed = position_encoding_xy(obj_center[:, 2], obj_center[:, 3], self.d_model)
+        query_sine_embed = torch.cat([xy_embed, wh_embed], dim=1)
+        query_pos = self.ref_point_head(query_sine_embed)
+
+        # scale transformation
+        if self.query_scale_type != 'fix_elewise':
+            pos_transformation = 1
+        else:
+            pos_transformation = self.query_scale.weight[0]
+
+        query_sine_embed = query_sine_embed[:, :self.d_model] * pos_transformation
+
+        # modulated HW attentions (if used)
+        if self.modulate_hw_attn:
+            refHW_cond = self.ref_anchor_head(output).sigmoid()  # nq, bs, 2
+            query_sine_embed[..., self.d_model // 2:] *= (refHW_cond[..., 0] / obj_center[..., 2]).unsqueeze(-1)
+            query_sine_embed[..., :self.d_model // 2] *= (refHW_cond[..., 1] / obj_center[..., 3]).unsqueeze(-1)
+
+        # run only first decoder layer
+        output = layer(memory=memory, memory_lens=memory_lens,
+                    tgt=output, tgt_lens=tgt_lens,
+                    pos=pos, query_pos=query_pos, query_sine_embed=query_sine_embed,
+                    is_first=True, self_attn_bias=self_attn_bias)
+
+        # bbox / refpoint update
+        if self.bbox_embed is not None:
+            tmp = self.bbox_embed[0](self.norm(output))
+            tmp[..., :self.query_dim] += inverse_sigmoid(reference_points)
+            new_reference_points = tmp[..., :self.query_dim].sigmoid()
+            ref_points.append(new_reference_points.view(B, num_queries, self.query_dim))
+            reference_points = new_reference_points.detach()
+
+        # output
+        if self.return_intermediate:
+            return [
+                self.norm(output).view(B, num_queries, self.d_model).unsqueeze(0),
+                torch.stack(ref_points)
+            ]
+        else:
+            return output.unsqueeze(0)
+
 
 class XformerDecoderLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.0,

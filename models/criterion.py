@@ -1362,7 +1362,12 @@ class SetCriterion_SATPR_IMG(nn.Module):
             valid_batch_idx = torch.where(torch.tensor([t['detect_all_people'] for t in targets]))[0]
             detection_valid_mask[valid_batch_idx] = True
 
-        
+            if 'is_pn' in kwargs and kwargs['is_pn']:
+                # labels = torch.zeros_like(pred_confs)
+                detection_valid_mask = torch.zeros_like(pred_confs,dtype=bool)
+                for n, kept_idx in enumerate(outputs['kept_indices']):
+                    detection_valid_mask[n][:len(kept_idx)] = True
+                
         losses = {}
         if is_dn:
             losses[loss] = focal_loss(pred_confs, labels) / num_instances
@@ -1564,7 +1569,7 @@ class SetCriterion_SATPR_IMG(nn.Module):
             losses.update(self.get_loss(loss, outputs_ref, targets, ref_indices, num_valid_instances[loss]))
             if loss == 'scale_map':
                 continue
-            pr_loss = self.get_loss(loss, outputs_pr, targets, pr_indices, num_valid_instances[loss])
+            pr_loss = self.get_loss(loss, outputs_pr, targets, pr_indices, num_valid_instances[loss], is_pn=True)
             pr_loss = {f'{k}_pr': v for k, v in pr_loss.items()}
             losses.update(pr_loss)
         

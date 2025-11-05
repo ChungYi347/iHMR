@@ -26,7 +26,7 @@ from models.encoders import build_encoder
 from .matcher import build_matcher
 from .decoder import build_decoder
 from .position_encoding import position_encoding_xy
-from .criterion import SetCriterion_SATPR
+from .criterion import SetCriterion_SATPR, SetCriterion, SetCriterion_SATPR_IMG
 from .dn_components import prepare_for_cdn, dn_post_process, prepare_prompt_query_box
 import copy
 
@@ -37,14 +37,10 @@ from models.prompt.prompt_encoder import PromptEncoderBox
 from PIL import Image
 
 from models.sam2.build_sam2 import build_sam2
-from models.sam2.sam2_image_predictor import SAM2ImagePredictor
-from sam2.sam2_video_predictor import SAM2VideoPredictor
-from sam2.utils.misc import mask_to_box
 
-from utils.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
+from utils.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, j2ds_to_bboxes_xywh
 from typing import List, Dict, Any, Tuple, Optional
 import hydra
-from models.utils import MaskEncoder
 
 
 def _get_clones(module, N):
@@ -57,8 +53,48 @@ import torch.nn.functional as F
 from models.prompt.prompt_encoder import PromptEncoderBox
 from inspect import isfunction
 from einops import rearrange
-from torch.utils.checkpoint import checkpoint
-from models.encoders.dinov2.layers import MemEffCrossAttention
+from models.encoders.dinov2.layers import MemEffCrossAttention, SelfAttention, MemEffCrossAttentionWeight, CrossAttention
+from models.utils import MaskEncoder
+from scipy.optimize import linear_sum_assignment 
+
+
+
+def exists(val):
+    "Code modified from https://github.com/shubham-goel/4D-Humans/blob/a0def798c7eac811a63c8220fcc22d983b39785e/hmr2/models/components/pose_transformer.py#L17"
+    return val is not None
+
+def default(val, d):
+    "Code modified from https://github.com/shubham-goel/4D-Humans/blob/a0def798c7eac811a63c8220fcc22d983b39785e/hmr2/models/components/pose_transformer.py#L21"
+    if exists(val):
+        return val
+    return d() if isfunction(d) else d
+
+def pairwise_iou(boxes1, boxes2):
+    if boxes1.numel() == 0 or boxes2.numel() == 0:
+        return torch.zeros((boxes1.shape[0], boxes2.shape[0]), dtype=torch.float32)
+
+    # [N,1,4] vs [1,M,4]
+    b1 = boxes1[:, None, :]  # (N,1,4)
+    b2 = boxes2[None, :, :]  # (1,M,4)
+
+    inter_x1 = torch.maximum(b1[...,0], b2[...,0])
+    inter_y1 = torch.maximum(b1[...,1], b2[...,1])
+    inter_x2 = torch.minimum(b1[...,2], b2[...,2])
+    inter_y2 = torch.minimum(b1[...,3], b2[...,3])
+
+    inter_w = torch.clamp(inter_x2 - inter_x1, min=0)
+    inter_h = torch.clamp(inter_y2 - inter_y1, min=0)
+    inter   = inter_w * inter_h
+
+    area1 = (boxes1[:,2] - boxes1[:,0]).clamp(min=0) * (boxes1[:,3] - boxes1[:,1]).clamp(min=0)  # (N,)
+    area2 = (boxes2[:,2] - boxes2[:,0]).clamp(min=0) * (boxes2[:,3] - boxes2[:,1]).clamp(min=0)  # (M,)
+    union = area1[:,None] + area2[None,:] - inter
+
+    iou = torch.zeros_like(union, dtype=torch.float32)
+    valid = union > 0
+    iou[valid] = inter[valid] / union[valid]
+    return iou
+
 
 class VideoModel(nn.Module):
     """ One-stage Multi-person Human Mesh Estimation via Scale-adaptive Tokens """
@@ -245,54 +281,36 @@ class VideoModel(nn.Module):
                 self.dn_enc = nn.Embedding(dn_cfg['dn_labelbook_size'], hidden_dim)
             elif dn_cfg['tgt_embed_type'] == 'params':
                 self.dn_enc = nn.Linear(num_poses*3 + dim_shape, hidden_dim)
+            elif dn_cfg['tgt_embed_type'] == 'boxes':
+                self.dn_enc = nn.Linear(num_poses*3 + dim_shape, hidden_dim)
+                self.dn_boxes_enc = nn.Linear(hidden_dim*3, hidden_dim)
             else:
                 raise NotImplementedError
 
-        self.prompt_encoder = PromptEncoderBox(
-            embed_dim=hidden_dim,
-            input_image_size=[self.input_size, self.input_size],
-        )
-        self.dn_prompt_enc = nn.Linear(hidden_dim * 2, hidden_dim)
-        # self.dn_prompt_enc = nn.Linear(hidden_dim, hidden_dim)
-
-        # num_heads = 4
-        # self.prompt_cross_attn = PromptRefinementModule(hidden_dim, num_heads)
-        # self.prompt_cross_attn_points = PromptRefinementModule(hidden_dim, num_heads)
-        # self.prompt_cross_attn = PromptRefinementModule(hidden_dim)
-        # self.prompt_cross_attn_points = PromptRefinementModule(hidden_dim)
-
-
-        sam2_model_cfg="sam2.1_hiera_l"
-        sam2_checkpoint="weights/sam2.1_hiera_large.pt"
-        enable_video = False
+        # self.prompt_encoder = PromptEncoderBox(
+        #     embed_dim=hidden_dim,
+        #     input_image_size=[self.input_size/14, self.input_size/14],
+        # )
+        # self.dn_prompt_enc = nn.Linear(hidden_dim * 3, hidden_dim)
+        # # self.dn_prompt_enc = nn.Linear(num_poses*3 + dim_shape, hidden_dim)
+        self.prompt_cross_attn = MemEffCrossAttentionWeight(4)
 
         self.hidden_dim = hidden_dim
         self.embed_dim = hidden_dim
-        self.img_size = 896
+        self.img_size = 1288
 
-        # self.mask_encoder = MaskEncoder()
-        # self.prompt_cross_attn = MemEffCrossAttention(hidden_dim)
+        # self.next_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        # with torch.no_grad(): 
+        #     for p_new, p_old in zip(self.next_bbox_embed.parameters(), self.bbox_embed[-1].parameters()):
+        #         p_new.copy_(p_old) 
+
+        # for p in self.next_bbox_embed.parameters():
+        #     p.requires_grad_(True)
+
+        self.ema_factor = 0.8
+
+        self.tracking_query_cross_attn = CrossAttention(hidden_dim)
         
-        # self.image_encoder = SAM2ImageEncoder(sam2_model_cfg, sam2_checkpoint, enable_video)
-        
-        # self.prompt_encoder = SAM2PromptEncoder(
-        #     embed_dim=1024,
-        #     image_embedding_size=(64, 64),
-        #     input_image_size=(self.img_size, self.img_size),
-        #     text_prompt=False,
-        #     kpt_prompt=False,
-        #     mask_prompt=False,
-        #     box_prompt=True
-        # )
-
-        # self.mask_mem_projector = nn.Sequential(
-        #     nn.AdaptiveAvgPool2d((8, 8)),
-        #     nn.Flatten(1),                    # (B, 4096)
-        #     nn.Linear(64*8*8, 768),           # (B, 768)
-        #     nn.GELU(),
-        #     nn.LayerNorm(768)
-        # )
-
     def lvl_pooling(self, tokens):
         assert len(tokens)%4 == 0
         C = tokens.shape[-1]
@@ -314,7 +332,7 @@ class VideoModel(nn.Module):
         mask[torch.any(mask, dim=1)] = True
         return mask.flatten()
 
-    def forward_encoder(self, samples, targets, use_gt = False):
+    def forward_encoder(self, samples, targets, masks=None, use_gt = False):
         B = len(samples)
         C = self.encoder.embed_dim
         cr_token_list = [self.encoder_cr_token]*len(samples)
@@ -486,7 +504,10 @@ class VideoModel(nn.Module):
 
             else:
                 # prune lvl1 correspond to lvl0
-                lvl1_valid_mask = self.pad_mask(lvl1_valid_mask)
+                try:
+                    lvl1_valid_mask = self.pad_mask(lvl1_valid_mask)
+                except:
+                    import pdb; pdb.set_trace()
                 lvl1_keep = lvl1_valid_mask & (~lvl1_sat_mask)
                 lvl1_to_lvl2 = ~lvl1_valid_mask
 
@@ -582,9 +603,9 @@ class VideoModel(nn.Module):
         # flatten and compute
         poses = poses.flatten(0,1) # (bs*n_q,24*3)
         shapes = shapes.flatten(0,1) # (bs*n_q,10)
-        with torch.no_grad():
-            verts, joints = self.human_model(poses=poses,
-                                            betas=shapes)
+        # with torch.no_grad():
+        verts, joints = self.human_model(poses=poses,
+                                        betas=shapes)
         num_verts = verts.shape[1]
         num_joints = joints.shape[1]
         verts = verts.reshape(bs,num_queries,num_verts,3)
@@ -610,46 +631,24 @@ class VideoModel(nn.Module):
 
         return verts_cam, j3ds_cam, j2ds_img, depths, transl.flatten(2)
 
-    def get_all_outputs(self, inference_state):
-        results = []  # (obj_id, output_type, frame_id, value) 튜플을 담음
-        per_obj = inference_state['output_dict_per_obj']
 
-        for obj_id, obj_outputs in per_obj.items():
-            for output_type in ['cond_frame_outputs', 'non_cond_frame_outputs']:
-                if output_type in obj_outputs:
-                    for frame_id, value in obj_outputs[output_type].items():
-                        # results.append([obj_id, output_type, frame_id, value])
-                        results.append(value['maskmem_features'])
-        return torch.tensor(results,device=value['maskmem_features'].device)
+    def forward(self, samples: NestedTensor, targets, sam2_image_model=None, masks=None, sat_use_gt = False, detach_j3ds = False, boxes=None):
+        """ The forward expects a NestedTensor, which consists of:
+               - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
+               - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
 
-    def _build_video_dir(self, _samples):
-        h, w = _samples[0][0].shape[-2], _samples[0][0].shape[-1]
-        frames = torch.stack([s.squeeze(0) for s in _samples[0]], dim=0).to(_samples[0][0].device)
-        return [frames, h, w]
+            It returns a dict with the following elements:
+               - "pred_logits": the classification logits (including no-object) for all queries.
+                                Shape= [batch_size x num_queries x num_classes]
+               - "pred_boxes": The normalized boxes coordinates for all queries, represented as
+                               (center_x, center_y, width, height). These values are normalized in [0, 1],
+                               relative to the size of each individual image (disregarding possible padding).
+                               See PostProcess for information on how to retrieve the unnormalized bounding box.
+               - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
+                                dictionnaries containing the two above keys for each decoder layer.
+        """
 
-    def _init_tracker(self, tracker, video_dir):
-        inference_state = tracker.init_state(video_path=video_dir)
-        tracker.reset_state(inference_state)
-        return inference_state
-
-    def _prepare_input_boxes(self, _targets):
-        body_bbox = _targets[0][0][0]['boxes']                      # cxcywh norm
-        body_bbox = box_cxcywh_to_xyxy(body_bbox) * self.input_size # xyxy abs
-        input_boxes = body_bbox[:, [0,1,2,3]]
-        if len(input_boxes) == 0:
-            input_boxes = torch.tensor([[0,0,0,0]], device=body_bbox.device)
-        ann_frame_idx = 0
-        ann_obj_ids = np.arange(1, body_bbox.shape[0] + 1)
-        return input_boxes, ann_frame_idx, ann_obj_ids
-
-    def _seed_tracker(self, tracker, inference_state, input_boxes, ann_frame_idx, ann_obj_ids):
-        for box, oid in zip(input_boxes.detach().cpu(), ann_obj_ids):
-            _, _, _ = tracker.add_new_points_or_box(
-                inference_state=inference_state, frame_idx=ann_frame_idx, obj_id=int(oid), box=box
-            )
-
-    def forward_first_batch(self, samples: NestedTensor, targets, tracker=None, sat_use_gt=False, detach_j3ds=False) :
-        outputs = []
+        assert isinstance(samples, (list, torch.Tensor))
 
         if self.training:
             self.preprocessed_pos_lvl1 = None
@@ -660,390 +659,223 @@ class VideoModel(nn.Module):
                                             antialias=self.encoder.interpolate_antialias,
                                             size = (int(self.feature_size[1]),int(self.feature_size[1]))).squeeze(0).permute(1,2,0)
 
-        final_features, pos_embeds, token_lens, scale_map_dict, sat_dict\
-        = self.forward_encoder(samples, targets, use_gt = sat_use_gt)
-
-        device = samples[0].device
-        batch_size = len(samples)
 
         bs = len(targets)
+        device = samples[0].device
 
+        # get cam_intrinsics
         img_size = torch.stack([t['img_size'].flip(0) for t in targets])
         valid_ratio = img_size/self.input_size
         
         cam_intrinsics = self.cam_intrinsics.repeat(bs, 1, 1, 1)
-        cam_intrinsics[...,:2,2] = cam_intrinsics[...,:2,2] * valid_ratio[:, None, :]
-        
-        embedweight = (self.refpoint_embed.weight).unsqueeze(0).repeat(bs,1,1)
-        tgt = (self.tgt_embed.weight).unsqueeze(0).repeat(bs,1,1)
-        attn_mask = None
+        cam_intrinsics[...,:2,2] = cam_intrinsics[...,:2,2] * valid_ratio[:, None, :].to(cam_intrinsics.device)
 
-        tgt_lens = [tgt.shape[1]]*bs
-
-        hs, reference = self.decoder(memory=final_features, memory_lens=token_lens,
-                                        tgt=tgt.flatten(0,1), tgt_lens=tgt_lens,
-                                        refpoint_embed=embedweight.flatten(0,1),
-                                        pos_embed=pos_embeds,
-                                        self_attn_mask = attn_mask)
-        reference_before_sigmoid = inverse_sigmoid(reference)
-        outputs_coords = []
-        for lvl in range(hs.shape[0]):
-            tmp = self.bbox_embed[lvl](hs[lvl])
-            tmp[..., :self.query_dim] += reference_before_sigmoid[lvl]
-            outputs_coord = tmp.sigmoid()
-            outputs_coords.append(outputs_coord)
-        pred_boxes = torch.stack(outputs_coords)
-
-        outputs_poses = []
-        outputs_shapes = []
-        outputs_confs = []
-        outputs_j3ds = []
-        outputs_j2ds = []
-        outputs_depths = []
-
-        # shape of hs: (lvl, bs, num_queries, dim)
-        outputs_pose_6d = self.mean_pose.view(1, 1, -1)
-        outputs_shape = self.mean_shape.view(1, 1, -1)
-        for lvl in range(hs.shape[0]):
-
-            outputs_pose_6d = outputs_pose_6d + self.pose_head[lvl](hs[lvl])
-            outputs_shape = outputs_shape + self.shape_head[lvl](hs[lvl])
-
-            if self.training or lvl == hs.shape[0] - 1:
-                outputs_pose = rot6d_to_axis_angle(outputs_pose_6d)
-
-                outputs_conf = self.conf_head(hs[lvl]).sigmoid()
-
-                # cam
-                cam_xys = self.cam_head(hs[lvl])
-
-                
-                outputs_vert, outputs_j3d, outputs_j2d, depth, transl\
-                = self.process_smpl(poses = outputs_pose,
-                                    shapes = outputs_shape,
-                                    cam_xys = cam_xys,
-                                    cam_intrinsics = cam_intrinsics,
-                                    detach_j3ds = detach_j3ds)
-                
-                outputs_poses.append(outputs_pose)
-                outputs_shapes.append(outputs_shape)
-                outputs_confs.append(outputs_conf)
-                # outputs_verts.append(outputs_vert)
-                outputs_j3ds.append(outputs_j3d)
-                outputs_j2ds.append(outputs_j2d)
-                outputs_depths.append(depth)
-        
-        pred_poses = torch.stack(outputs_poses)
-        pred_betas = torch.stack(outputs_shapes)
-        pred_confs = torch.stack(outputs_confs)
-        pred_verts = outputs_vert
-        pred_transl = transl
-        pred_intrinsics = cam_intrinsics
-        pred_j3ds = torch.stack(outputs_j3ds)
-        pred_j2ds = torch.stack(outputs_j2ds)
-        pred_depths = torch.stack(outputs_depths)
-
-        out = {'pred_poses': pred_poses[-1], 'pred_betas': pred_betas[-1],
-                'pred_boxes': pred_boxes[-1], 'pred_confs': pred_confs[-1], 
-            'pred_j3ds': pred_j3ds[-1], 'pred_j2ds': pred_j2ds[-1],
-            'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
-            'pred_depths': pred_depths[-1], 'pred_transl': pred_transl}
-        
-        if self.use_sat:
-            out['enc_outputs'] = scale_map_dict
-        
-        out['sat'] = sat_dict
-
-        outputs.append(out)
-
-        return outputs
-
-    def inference(self, samples, targets, tracker, sat_use_gt, detach_j3ds):
-        outputs = []
-
-        if self.training:
-            self.preprocessed_pos_lvl1 = None
-
-        elif self.preprocessed_pos_lvl1 is None and self.use_sat:
-            self.preprocessed_pos_lvl1 = F.interpolate(self.encoder_pos_embeds.unsqueeze(0).permute(0, 3, 1, 2),
-                                            mode="bicubic",
-                                            antialias=self.encoder.interpolate_antialias,
-                                            size = (int(self.feature_size[1]),int(self.feature_size[1]))).squeeze(0).permute(1,2,0)
 
         final_features, pos_embeds, token_lens, scale_map_dict, sat_dict\
-        = self.forward_encoder(samples, targets, use_gt = sat_use_gt)
+             = self.forward_encoder(samples, targets, masks=masks, use_gt = sat_use_gt)
 
-        mask_boxes = box_xyxy_to_cxcywh(mask_to_box(out_mask_logits > 0)[:, 0, :] / self.input_size)
-
-        device = samples[0].device
-        batch_size = len(samples)
-
-        bs = len(targets)
-
-        img_size = torch.stack([t['img_size'].flip(0) for t in targets])
-        valid_ratio = img_size/self.input_size
-        
-        cam_intrinsics = self.cam_intrinsics.repeat(bs, 1, 1, 1)
-        cam_intrinsics[...,:2,2] = cam_intrinsics[...,:2,2] * valid_ratio[:, None, :]
-        
-        pr_tgt, pr_points, pr_attn_mask, prompt_dn_meta =\
-                                prepare_prompt_query_box(targets, self.dn_cfg, num_queries=self.num_queries, 
-                                # hidden_dim = self.hidden_dim, prompt_encoder=self.prompt_encoder, dn_prompt_enc = self.dn_prompt_enc)
-                                hidden_dim = self.hidden_dim, mask_encoder=self.mask_encoder,
-                                mask_boxes=mask_boxes, masks=out_mask_logits)
-                                # sparse_embeddings=all_sparse_embeddings)
-
+        # default dab-detr pipeline
         embedweight = (self.refpoint_embed.weight).unsqueeze(0).repeat(bs,1,1)
         tgt = (self.tgt_embed.weight).unsqueeze(0).repeat(bs,1,1)
 
-        pr_pad = prompt_dn_meta['pad_size']
-        attn_mask = pr_attn_mask[:pr_pad, :pr_pad] if pr_pad > 0 else None
 
-        tgt = torch.cat([pr_tgt, tgt], dim=1)                       # [B, pr_pad + num_queries, C]
-        embedweight = torch.cat([pr_points, embedweight], dim=1)  # [B, pr_pad + num_queries, ...] (ref coords)
+        # import pdb; pdb.set_trace()
+        pr_points = None
+        _boxes = []
+        if self.training or (hasattr(self, 'tracker') and len(self.tracker.tracks) != 0):
+            if self.training:
+                if self.img_seq_idx == 0:
+                    _boxes = [t['boxes'] for t in targets]
+                    _removed_boxes, _kept_indices = [], []
+                    for boxes in _boxes:
+                        n = len(boxes)
+                        keep_idx = torch.tensor(
+                            sorted(random.sample(range(n), k=max(1, int(n * (1 - random.uniform(0.1, 0.7)))))),
+                            dtype=torch.long
+                        )
+                        _removed_boxes.append(boxes[keep_idx])
+                        _kept_indices.append(keep_idx)
+                    _boxes = _removed_boxes
+                    self._kept_indices = _kept_indices
+                else:
+                    _removed_boxes = []
+                    _boxes = [t['boxes'] for t in targets]
+                    for boxes, keep_idx in zip(_boxes, self._kept_indices):
+                        _removed_boxes.append(boxes[keep_idx])
+                    _boxes = _removed_boxes
 
-        pr_pad = prompt_dn_meta['pad_size']          
-        num_queries = self.num_queries               
-        N = pr_pad + num_queries
-        device = pr_tgt.device
-
-        pr_s, pr_e = 0, pr_pad
-        or_s, or_e = pr_e, pr_e + num_queries
-
-        attn_mask = torch.zeros((N, N), dtype=torch.bool, device=device)
-        pr_block = pr_attn_mask[:pr_pad, :pr_pad] if pr_pad > 0 and pr_attn_mask is not None else None
-        if pr_block is not None:
-            attn_mask[pr_s:pr_e, pr_s:pr_e] |= pr_block
-
-        tgt_lens = [tgt.shape[1]]*bs
-
-        hs, reference = self.decoder(memory=final_features, memory_lens=token_lens,
-                                        tgt=tgt.flatten(0,1), tgt_lens=tgt_lens,
-                                        refpoint_embed=embedweight.flatten(0,1),
-                                        pos_embed=pos_embeds,
-                                        self_attn_mask = attn_mask)
-        reference_before_sigmoid = inverse_sigmoid(reference)
-        outputs_coords = []
-        for lvl in range(hs.shape[0]):
-            tmp = self.bbox_embed[lvl](hs[lvl])
-            tmp[..., :self.query_dim] += reference_before_sigmoid[lvl]
-            outputs_coord = tmp.sigmoid()
-            outputs_coords.append(outputs_coord)
-        pred_boxes = torch.stack(outputs_coords)
-
-        outputs_poses = []
-        outputs_shapes = []
-        outputs_confs = []
-        outputs_j3ds = []
-        outputs_j2ds = []
-        outputs_depths = []
-
-        # shape of hs: (lvl, bs, num_queries, dim)
-        outputs_pose_6d = self.mean_pose.view(1, 1, -1)
-        outputs_shape = self.mean_shape.view(1, 1, -1)
-        for lvl in range(hs.shape[0]):
-
-            outputs_pose_6d = outputs_pose_6d + self.pose_head[lvl](hs[lvl])
-            outputs_shape = outputs_shape + self.shape_head[lvl](hs[lvl])
-
-            if self.training or lvl == hs.shape[0] - 1:
-                outputs_pose = rot6d_to_axis_angle(outputs_pose_6d)
-
-                outputs_conf = self.conf_head(hs[lvl]).sigmoid()
-
-                # cam
-                cam_xys = self.cam_head(hs[lvl])
-
+            elif (hasattr(self, 'tracker') and len(self.tracker.tracks) != 0):
+                # _boxes = [box_xyxy_to_cxcywh((v['box'] * 0.5 + v['prev_box'] * 0.5) / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
+                # _boxes = [box_xyxy_to_cxcywh(box_cxcywh_to_xyxy(v['box'] / self.input_size)) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
+                # prev_boxes = [box_xyxy_to_cxcywh(v['prev_box'] / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
                 
-                outputs_vert, outputs_j3d, outputs_j2d, depth, transl\
-                = self.process_smpl(poses = outputs_pose,
-                                    shapes = outputs_shape,
-                                    cam_xys = cam_xys,
-                                    cam_intrinsics = cam_intrinsics,
-                                    detach_j3ds = detach_j3ds)
+                # _boxes = [box_cxcywh_to_xyxy(v['kf'].get_xyxy() / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
+                # _boxes = [t['boxes'] for t in targets]
+                _boxes = [box_xyxy_to_cxcywh(v['box'] / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
                 
-                outputs_poses.append(outputs_pose)
-                outputs_shapes.append(outputs_shape)
-                outputs_confs.append(outputs_conf)
-                # outputs_verts.append(outputs_vert)
-                outputs_j3ds.append(outputs_j3d)
-                outputs_j2ds.append(outputs_j2d)
-                outputs_depths.append(depth)
-        
-        pred_poses = torch.stack(outputs_poses)
-        pred_betas = torch.stack(outputs_shapes)
-        pred_confs = torch.stack(outputs_confs)
-        pred_verts = outputs_vert
-        pred_transl = transl
-        pred_intrinsics = cam_intrinsics
-        pred_j3ds = torch.stack(outputs_j3ds)
-        pred_j2ds = torch.stack(outputs_j2ds)
-        pred_depths = torch.stack(outputs_depths)
-
-        out = {'pred_poses': pred_poses[-1], 'pred_betas': pred_betas[-1],
-                'pred_boxes': pred_boxes[-1], 'pred_confs': pred_confs[-1], 
-            'pred_j3ds': pred_j3ds[-1], 'pred_j2ds': pred_j2ds[-1],
-            'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
-            'pred_depths': pred_depths[-1], 'pred_transl': pred_transl}
-        
-        if self.use_sat:
-            out['enc_outputs'] = scale_map_dict
-        
-        out['sat'] = sat_dict
-
-        outputs.append(out)
-        return outputs
-
-
-    def forward(self, _samples: NestedTensor, _targets, tracker=None, sat_use_gt=False, detach_j3ds=False):
-        if not self.training:
-            return self.inference(_samples, _targets, tracker, sat_use_gt, detach_j3ds)
-
-        with torch.no_grad():
-            video_dir = self._build_video_dir(_samples)
-            inference_state = self._init_tracker(tracker, video_dir)
-            input_boxes, ann_frame_idx, ann_obj_ids = self._prepare_input_boxes(_targets)
-            self._seed_tracker(tracker, inference_state, input_boxes, ann_frame_idx, ann_obj_ids)
-            gen = tracker.propagate_in_video(inference_state, is_tqdm=False)
-
-        zipped = enumerate(zip(_samples[0], _targets[0], gen))
-        outputs = []
-
-        for n, (samples, targets, (out_frame_idx, out_obj_ids, out_mask_logits)) in zipped:
-            # mean = torch.tensor([123.675, 116.28, 103.53]).view(3, 1, 1)
-            # std = torch.tensor([58.395, 57.12, 57.375]).view(3, 1, 1)
-            # device = _samples[0][0].device
-            # mean = mean.to(device)
-            # std = std.to(device) 
-            
-            # img = samples * std + mean
-            # img = torch.clamp(img, 0, 255).to(torch.uint8)
-            # img = img.permute(0, 2, 3, 1)  # (1, H, W, 3)
-            # img_np = img[0].cpu().numpy()
-
-            # import matplotlib.pyplot as plt
-            # def show_box(box, ax):
-            #     x0, y0 = box[0], box[1]
-            #     w, h = box[2] - box[0], box[3] - box[1]
-            #     print(x0, y0, w, h)
-            #     ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0, 0, 0, 0), lw=2))
-
-            # def show_mask(mask, ax, obj_id=None, random_color=False):
-            #     if random_color:
-            #         color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
-            #     else:
-            #         cmap = plt.get_cmap("tab10")
-            #         cmap_idx = 0 if obj_id is None else obj_id
-            #         color = np.array([*cmap(cmap_idx)[:3], 0.6])
-            #     h, w = mask.shape[-2:]
-            #     mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
-            #     ax.imshow(mask_image)
-
-            # plt.figure(figsize=(9, 9))
-            # plt.imshow(img_np)
-            
-            # for n in range(len(out_mask_logits)):
-            #     mask = F.interpolate(out_mask_logits[n].unsqueeze(0), size=(out_mask_logits.shape[-2], out_mask_logits.shape[-1]), mode='bilinear', align_corners=False)[0]
-            #     show_mask((mask > 0.0).cpu().numpy(), plt.gca(), obj_id=n)
-            #     show_box(input_boxes.cpu().numpy()[n], plt.gca())
-
-            # print(f'test_mask_all_{n}.png')
-            # mask_boxes = box_xyxy_to_cxcywh(mask_to_box(out_mask_logits > 0)[:, 0, :] / self.input_size)
-            # print(mask_boxes)
-            # boxes = torch.cat([t['boxes'] for t in targets])       
-            # print(boxes)
-            # plt.savefig(f'test_mask_all_{n}.png')
-            # plt.close()
-            # import pdb; pdb.set_trace()
 
             if self.training:
-                self.preprocessed_pos_lvl1 = None
+                box_noise_scale = 0.2
+                __boxes = []
+                for pr_boxes in _boxes:
+                    known_bboxs = pr_boxes
+                    known_bbox_ = torch.zeros_like(known_bboxs)
+                    known_bbox_[:, :2] = known_bboxs[:, :2] - known_bboxs[:, 2:] / 2
+                    known_bbox_[:, 2:] = known_bboxs[:, :2] + known_bboxs[:, 2:] / 2
 
-            elif self.preprocessed_pos_lvl1 is None and self.use_sat:
-                self.preprocessed_pos_lvl1 = F.interpolate(self.encoder_pos_embeds.unsqueeze(0).permute(0, 3, 1, 2),
-                                                mode="bicubic",
-                                                antialias=self.encoder.interpolate_antialias,
-                                                size = (int(self.feature_size[1]),int(self.feature_size[1]))).squeeze(0).permute(1,2,0)
+                    diff = torch.zeros_like(known_bboxs)
+                    diff[:, :2] = known_bboxs[:, 2:] / 2
+                    diff[:, 2:] = known_bboxs[:, 2:] / 2
 
-            final_features, pos_embeds, token_lens, scale_map_dict, sat_dict\
-            = self.forward_encoder(samples, targets, use_gt = sat_use_gt)
-
-            mask_boxes = box_xyxy_to_cxcywh(mask_to_box(out_mask_logits > 0)[:, 0, :] / self.input_size)
-
-            device = samples[0].device
-            batch_size = len(samples)
-
-            bs = len(targets)
-
-            img_size = torch.stack([t['img_size'].flip(0) for t in targets])
-            valid_ratio = img_size/self.input_size
+                    rand_sign = torch.randint_like(known_bboxs, low=0, high=2, dtype=torch.float32) * 2.0 - 1.0
+                    rand_part = torch.rand_like(known_bboxs)
+                    rand_part *= rand_sign
+                    known_bbox_ = known_bbox_ + torch.mul(rand_part,
+                                                            diff).to(device=device) * box_noise_scale
+                    known_bbox_ = known_bbox_.clamp(min=0.0, max=1.0)
+                    known_bbox_expand = torch.zeros_like(known_bboxs)
+                    known_bbox_expand[:, :2] = (known_bbox_[:, :2] + known_bbox_[:, 2:]) / 2
+                    known_bbox_expand[:, 2:] = known_bbox_[:, 2:] - known_bbox_[:, :2]
+                    __boxes.append(known_bbox_expand)
+                _boxes = __boxes
             
-            cam_intrinsics = self.cam_intrinsics.repeat(bs, 1, 1, 1)
-            cam_intrinsics[...,:2,2] = cam_intrinsics[...,:2,2] * valid_ratio[:, None, :]
-            
-            pr_tgt, pr_points, pr_attn_mask, prompt_dn_meta =\
-                                prepare_prompt_query_box(targets, self.dn_cfg, num_queries=self.num_queries, 
-                                hidden_dim = self.hidden_dim, prompt_encoder=self.prompt_encoder, dn_prompt_enc = self.dn_prompt_enc,
-                                mask_boxes=mask_boxes)
-                                # hidden_dim = self.hidden_dim, prompt_encoder=self.prompt_encoder, dn_prompt_enc = self.dn_prompt_enc)
-                                # hidden_dim = self.hidden_dim, mask_encoder=self.mask_encoder,
-                                # mask_boxes=mask_boxes, masks=out_mask_logits)
-                                # sparse_embeddings=all_sparse_embeddings)
+            if len(_boxes) != 0:
+                max_len = max(b.shape[0] for b in _boxes)
+                boxes = []
+                for box in _boxes:
+                    num_boxes = box.shape[0] 
+                    num_repeats = (max_len + num_boxes - 1) // num_boxes 
+                    repeated_tensor = box.repeat(num_repeats, 1)
+                    sliced_tensor = repeated_tensor[:max_len]
+                    boxes.append(sliced_tensor)
+                pr_points = inverse_sigmoid(torch.stack(boxes))
 
-            embedweight = (self.refpoint_embed.weight).unsqueeze(0).repeat(bs,1,1)
-            tgt = (self.tgt_embed.weight).unsqueeze(0).repeat(bs,1,1)
-            # pr_tgt = self.prompt_cross_attn(q=pr_tgt, k=tgt, v=tgt)
+                attn_weights = self.prompt_cross_attn(q=pr_points, k=embedweight, v=embedweight)[:, 0, :, :]
+                pr_tgt = torch.matmul(attn_weights, tgt)
+                if (hasattr(self, 'tracker') and len(self.tracker.tracks) != 0):
+                    pr_tgt = pr_tgt[:, 0, :][None]
+                    pr_points = pr_points[:, 0, :][None]
+        elif hasattr(self, 'infer_joint') and self.infer_joint:
+            _boxes = [t['boxes'] for t in targets]
+            if len(_boxes) != 0:
+                max_len = max(b.shape[0] for b in _boxes)
+                boxes = []
+                for box in _boxes:
+                    num_boxes = box.shape[0] 
+                    num_repeats = (max_len + num_boxes - 1) // num_boxes 
+                    repeated_tensor = box.repeat(num_repeats, 1)
+                    sliced_tensor = repeated_tensor[:max_len]
+                    boxes.append(sliced_tensor)
+                pr_points = inverse_sigmoid(torch.stack(boxes)).to(embedweight.dtype)
 
-            if self.training and self.use_dn:
-                input_query_tgt, input_query_bbox, dn_attn_mask, dn_meta =\
-                                prepare_for_cdn(targets = targets, dn_cfg = self.dn_cfg, 
-                                            num_queries = self.num_queries, hidden_dim = self.hidden_dim, dn_enc = self.dn_enc)
-                tgt = torch.cat([input_query_tgt, pr_tgt, tgt], dim=1)
-                embedweight = torch.cat([input_query_bbox, pr_points, embedweight], dim=1)
+                attn_weights = self.prompt_cross_attn(q=pr_points, k=embedweight, v=embedweight)[:, 0, :, :]
+                pr_tgt = torch.matmul(attn_weights, tgt)
+                
+        # print(len(_boxes))
 
-                dn_pad = dn_meta['pad_size']
-                pr_pad = prompt_dn_meta['pad_size']
-                num_queries = self.num_queries
-                N = dn_pad + pr_pad + num_queries
-                device = dn_attn_mask.device
+        # pr_tgt, pr_points, pr_attn_mask, prompt_dn_meta =\
+        #             prepare_for_cdn(targets = targets, dn_cfg = self.dn_cfg, 
+        #                     # num_queries = self.num_queries, hidden_dim = self.hidden_dim, dn_enc = self.dn_prompt_enc)
+        #                     num_queries = self.num_queries, hidden_dim = self.hidden_dim, dn_enc = self.dn_prompt_enc)
+        # pr_tgt = torch.cat([tgt, pr_tgt], dim=1)
+        # pr_tgt, pr_points, pr_attn_mask, prompt_dn_meta =\
+        #                     prepare_prompt_query_box(targets, self.dn_cfg, num_queries=self.num_queries, 
+        #                     hidden_dim = self.hidden_dim, prompt_encoder=self.prompt_encoder, dn_enc = self.dn_prompt_enc,
+        #                     pr_tgt_embed=self.pr_tgt_embed, mask_boxes=None)
+        # pr_tgt, pr_points, pr_attn_mask, prompt_dn_meta =\
+        #                     prepare_for_cdn(targets = targets, dn_cfg = self.dn_cfg, 
+        #                                 num_queries = self.num_queries, hidden_dim = self.hidden_dim, dn_enc = self.dn_enc)
 
-                dn_s, dn_e = 0, dn_pad
-                pr_s, pr_e = dn_e, dn_e + pr_pad
-                or_s, or_e = pr_e, pr_e + num_queries
+        # tgt_size = pr_tgt.shape[1]
+        # device = samples[0].device
+        # self_attn_mask = torch.zeros((tgt_size, tgt_size), dtype=bool, device=device)
 
-                attn_mask = torch.zeros((N, N), dtype=torch.bool, device=device)
-                # attn_mask[:dn_pad, dn_pad:N] = True
-                # attn_mask[dn_pad:N, :dn_pad] = True
+        # random_flag = (torch.rand(1) >= 0.5).int()
+        # if random_flag == 0:
+        #     N = tgt.shape[1]  # obj query 개수
+        #     M = tgt_size - N  # prompt query 개수
+        #     self_attn_mask[:N, N:N+M] = True   # obj → prompt 차단
+        #     self_attn_mask[N:, :] = True   # obj → prompt 차단
 
-                # DN ↔ PR
-                attn_mask[dn_s:dn_e, pr_s:pr_e] = True
-                attn_mask[pr_s:pr_e, dn_s:dn_e] = True
-                # DN ↔ ORIG
-                attn_mask[dn_s:dn_e, or_s:or_e] = True
-                attn_mask[or_s:or_e, dn_s:dn_e] = True
+        # pr_tgt = self.prompt_cross_attn(x=pr_tgt, attn_bias=self_attn_mask)
+        # tgt = pr_tgt[:, :tgt.shape[1], :]
 
-                block_pr_orig = False # 2) PR ↔ ORIG Block 
-                if pr_pad > 0 and num_queries > 0 and block_pr_orig:
-                    attn_mask[pr_s:pr_e, or_s:or_e] = True
-                    attn_mask[or_s:or_e, pr_s:pr_e] = True
+        # if self.training and self.use_dn:
+        #     input_query_tgt, input_query_bbox, attn_mask, dn_meta =\
+        #                     prepare_for_cdn(targets = targets, dn_cfg = self.dn_cfg, 
+        #                                 num_queries = self.num_queries, hidden_dim = self.hidden_dim, dn_enc = self.dn_enc)
+        #                                 # num_queries = self.num_queries, hidden_dim = self.hidden_dim, dn_enc = self.dn_enc,
+        #                                 # prompt_encoder = self.prompt_encoder, pr_tgt_embed=self.pr_tgt_embed)
+        #     tgt = torch.cat([input_query_tgt, tgt], dim=1)
+        #     embedweight = torch.cat([input_query_bbox, embedweight], dim=1)
 
-                # Intra attn mask or block self attn
-                dn_block = dn_attn_mask[:dn_pad, :dn_pad] if dn_pad > 0 else None
-                pr_block = pr_attn_mask[:pr_pad, :pr_pad] if pr_pad > 0 else None
+        #     # dn_pad = dn_meta['pad_size']
+        #     # dn_s, dn_e = 0, dn_pad
+        #     # or_s, or_e = dn_e, dn_e + self.num_queries
+        #     # if dn_pad > 0 :
+        #     #     attn_mask[dn_s:dn_e, or_s:or_e] = False 
+        #     #     attn_mask[or_s:or_e, dn_s:dn_e] = True
+        # else:
+        #     attn_mask = None
 
-                if dn_block is not None:
-                    attn_mask[:dn_pad, :dn_pad] |= dn_block
+        if self.training and self.use_dn:
+            input_query_tgt, input_query_bbox, dn_attn_mask, dn_meta =\
+                            prepare_for_cdn(targets = targets, dn_cfg = self.dn_cfg, 
+                                        num_queries = self.num_queries, hidden_dim = self.hidden_dim, dn_enc = self.dn_enc)
+            tgt = torch.cat([input_query_tgt, pr_tgt, tgt], dim=1)
+            embedweight = torch.cat([input_query_bbox, pr_points, embedweight], dim=1)
 
-                if pr_block is not None:
-                    attn_mask[dn_pad:dn_pad+pr_pad, dn_pad:dn_pad+pr_pad] |= pr_block
-            else:
-                pr_pad = prompt_dn_meta['pad_size']
-                attn_mask = pr_attn_mask[:pr_pad, :pr_pad] if pr_pad > 0 else None
+            dn_pad = dn_meta['pad_size']
+            # pr_pad = prompt_dn_meta['pad_size']
+            pr_pad = pr_tgt.shape[1]
+            # pr_pad = prompt_pad_size
+            num_queries = self.num_queries
+            N = dn_pad + pr_pad + num_queries
+            device = dn_attn_mask.device
 
+            dn_s, dn_e = 0, dn_pad
+            pr_s, pr_e = dn_e, dn_e + pr_pad
+            or_s, or_e = pr_e, pr_e + num_queries
+
+            attn_mask = torch.zeros((N, N), dtype=torch.bool, device=device)
+            # attn_mask[:dn_pad, dn_pad:N] = True
+            # attn_mask[dn_pad:N, :dn_pad] = True
+
+            # DN ↔ PR
+            attn_mask[dn_s:dn_e, pr_s:pr_e] = True
+            attn_mask[pr_s:pr_e, dn_s:dn_e] = True
+            # DN ↔ ORIG
+            attn_mask[dn_s:dn_e, or_s:or_e] = True
+            attn_mask[or_s:or_e, dn_s:dn_e] = True
+
+            block_pr_orig = True # 2) PR ↔ ORIG Block 
+            if pr_pad > 0 and num_queries > 0 and block_pr_orig:
+                # attn_mask[pr_s:pr_e, or_s:or_e] = True
+                attn_mask[or_s:or_e, pr_s:pr_e] = True
+
+            # Intra attn mask or block self attn
+            dn_block = dn_attn_mask[:dn_pad, :dn_pad] if dn_pad > 0 else None
+            # pr_block = pr_attn_mask[:pr_pad, :pr_pad] if pr_pad > 0 else None
+
+            if dn_block is not None:
+                attn_mask[:dn_pad, :dn_pad] |= dn_block
+                attn_mask[:dn_pad, -num_queries:] = False 
+
+            # if pr_block is not None:
+            #     attn_mask[dn_pad:dn_pad+pr_pad, dn_pad:dn_pad+pr_pad] |= pr_block
+            attn_mask[dn_pad:dn_pad+pr_pad, -num_queries:] = False
+        else:
+            # pr_pad = prompt_pad_size
+            # attn_mask = pr_attn_mask[:pr_pad, :pr_pad] if pr_pad > 0 else None
+
+            # if self.training or (hasattr(self, 'tracker') and len(self.tracker.tracks) != 0):
+            # if self.training:
+            if len(_boxes) != 0:
+                pr_pad = pr_tgt.shape[1]
                 tgt = torch.cat([pr_tgt, tgt], dim=1)                       # [B, pr_pad + num_queries, C]
                 embedweight = torch.cat([pr_points, embedweight], dim=1)  # [B, pr_pad + num_queries, ...] (ref coords)
 
-                pr_pad = prompt_dn_meta['pad_size']          
+                # pr_pad = prompt_dn_meta['pad_size']          
                 num_queries = self.num_queries               
                 N = pr_pad + num_queries
                 device = pr_tgt.device
@@ -1052,466 +884,302 @@ class VideoModel(nn.Module):
                 or_s, or_e = pr_e, pr_e + num_queries
 
                 attn_mask = torch.zeros((N, N), dtype=torch.bool, device=device)
-                pr_block = pr_attn_mask[:pr_pad, :pr_pad] if pr_pad > 0 and pr_attn_mask is not None else None
-                if pr_block is not None:
-                    attn_mask[pr_s:pr_e, pr_s:pr_e] |= pr_block
-                # attn_mask = None
+                attn_mask[or_s:or_e, pr_s:pr_e] = True
+                attn_mask[pr_s:pr_e, or_s:or_e] = False 
+                attn_mask[0:0+pr_pad, -num_queries:] = False
+            else:
+                num_queries = self.num_queries               
+                device = tgt.device
 
-            tgt_lens = [tgt.shape[1]]*bs
+                or_s, or_e = 0, num_queries
 
-            hs, reference = self.decoder(memory=final_features, memory_lens=token_lens,
-                                            tgt=tgt.flatten(0,1), tgt_lens=tgt_lens,
-                                            refpoint_embed=embedweight.flatten(0,1),
-                                            pos_embed=pos_embeds,
-                                            self_attn_mask = attn_mask)
-            reference_before_sigmoid = inverse_sigmoid(reference)
-            outputs_coords = []
-            for lvl in range(hs.shape[0]):
-                tmp = self.bbox_embed[lvl](hs[lvl])
-                tmp[..., :self.query_dim] += reference_before_sigmoid[lvl]
-                outputs_coord = tmp.sigmoid()
-                outputs_coords.append(outputs_coord)
-            pred_boxes = torch.stack(outputs_coords)
+                attn_mask = torch.zeros((num_queries, num_queries), dtype=torch.bool, device=device)
 
-            # tracker.sam_prompt_encoder.mask_downscaling(out_mask_logits.clone())
+            # pr_block = pr_attn_mask[:pr_pad, :pr_pad] if pr_pad > 0 and pr_attn_mask is not None else None
+            # if pr_block is not None:
+            #     attn_mask[pr_s:pr_e, pr_s:pr_e] |= pr_block
+            # attn_mask = None
 
-            outputs_poses = []
-            outputs_shapes = []
-            outputs_confs = []
-            outputs_j3ds = []
-            outputs_j2ds = []
-            outputs_depths = []
+        tgt_lens = [tgt.shape[1]]*bs
 
-            # shape of hs: (lvl, bs, num_queries, dim)
-            outputs_pose_6d = self.mean_pose.view(1, 1, -1)
-            outputs_shape = self.mean_shape.view(1, 1, -1)
-            for lvl in range(hs.shape[0]):
-
-                outputs_pose_6d = outputs_pose_6d + self.pose_head[lvl](hs[lvl])
-                outputs_shape = outputs_shape + self.shape_head[lvl](hs[lvl])
-
-                if self.training or lvl == hs.shape[0] - 1:
-                    outputs_pose = rot6d_to_axis_angle(outputs_pose_6d)
-
-                    outputs_conf = self.conf_head(hs[lvl]).sigmoid()
-
-                    # cam
-                    cam_xys = self.cam_head(hs[lvl])
-
-                    
-                    outputs_vert, outputs_j3d, outputs_j2d, depth, transl\
-                    = self.process_smpl(poses = outputs_pose,
-                                        shapes = outputs_shape,
-                                        cam_xys = cam_xys,
-                                        cam_intrinsics = cam_intrinsics,
-                                        detach_j3ds = detach_j3ds)
-                    
-                    outputs_poses.append(outputs_pose)
-                    outputs_shapes.append(outputs_shape)
-                    outputs_confs.append(outputs_conf)
-                    # outputs_verts.append(outputs_vert)
-                    outputs_j3ds.append(outputs_j3d)
-                    outputs_j2ds.append(outputs_j2d)
-                    outputs_depths.append(depth)
-            
-            pred_poses = torch.stack(outputs_poses)
-            pred_betas = torch.stack(outputs_shapes)
-            pred_confs = torch.stack(outputs_confs)
-            pred_verts = outputs_vert
-            pred_transl = transl
-            pred_intrinsics = cam_intrinsics
-            pred_j3ds = torch.stack(outputs_j3ds)
-            pred_j2ds = torch.stack(outputs_j2ds)
-            pred_depths = torch.stack(outputs_depths)
-
-            if self.training > 0 and self.use_dn:
-                pred_poses, pred_betas,\
-                pred_boxes, pred_confs,\
-                pred_j3ds, pred_j2ds, pred_depths,\
-                pred_verts, pred_transl =\
-                    dn_post_process(pred_poses, pred_betas,
-                                    pred_boxes, pred_confs,
-                                    pred_j3ds, pred_j2ds, pred_depths,
-                                    pred_verts, pred_transl,
-                                    dn_meta, self.aux_loss, self._set_aux_loss)
-
-
-            out = {'pred_poses': pred_poses[-1], 'pred_betas': pred_betas[-1],
-                    'pred_boxes': pred_boxes[-1], 'pred_confs': pred_confs[-1], 
-                'pred_j3ds': pred_j3ds[-1], 'pred_j2ds': pred_j2ds[-1],
-                'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
-                'pred_depths': pred_depths[-1], 'pred_transl': pred_transl}
-            
-            if self.aux_loss and self.training:
-                out['aux_outputs'] = self._set_aux_loss(pred_poses, pred_betas,
-                                                        pred_boxes, pred_confs,
-                                                        pred_j3ds, pred_j2ds, pred_depths)
-
-            if self.use_sat:
-                out['enc_outputs'] = scale_map_dict
-            
-            out['sat'] = sat_dict
-
-            if self.training > 0 and self.use_dn:
-                out['dn_meta'] = dn_meta
-            outputs.append(out)
-
-        return outputs
-
-    # def forward(self, _samples: NestedTensor, _targets, tracker=None, sat_use_gt = False, detach_j3ds = False):
-    #     """ The forward expects a NestedTensor, which consists of:
-    #            - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
-    #            - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
-
-    #         It returns a dict with the following elements:
-    #            - "pred_logits": the classification logits (including no-object) for all queries.
-    #                             Shape= [batch_size x num_queries x num_classes]
-    #            - "pred_boxes": The normalized boxes coordinates for all queries, represented as
-    #                            (center_x, center_y, width, height). These values are normalized in [0, 1],
-    #                            relative to the size of each individual image (disregarding possible padding).
-    #                            See PostProcess for information on how to retrieve the unnormalized bounding box.
-    #            - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
-    #                             dictionnaries containing the two above keys for each decoder layer.
-    #     """
-
-    #     with torch.no_grad():
-    #         height, width = _samples[0][0].shape[-2], _samples[0][0].shape[-1]
-    #         video_dir = [
-    #             torch.stack([samples.squeeze(0) for samples in _samples[0]], dim=0).to(_samples[0][0].device),
-    #             height,
-    #             width
-    #         ]
-    #         inference_state = tracker.init_state(video_path=video_dir)
-    #         tracker.reset_state(inference_state)
-
-    #         body_bbox = _targets[0][0][0]['boxes']
-    #         body_bbox = box_cxcywh_to_xyxy(body_bbox) * self.input_size
-    #         input_boxes= torch.cat([
-    #             body_bbox[:, [0]],  
-    #             body_bbox[:, [1]],  
-    #             body_bbox[:, [2]],  
-    #             body_bbox[:, [3]]  
-    #         ], dim=1)
-            
-    #         if len(input_boxes) == 0:
-    #             input_boxes = torch.tensor([[0, 0, 0, 0]])
+        hs, reference = self.decoder(memory=final_features, memory_lens=token_lens,
+                                         tgt=tgt.flatten(0,1), tgt_lens=tgt_lens,
+                                         refpoint_embed=embedweight.flatten(0,1),
+                                         pos_embed=pos_embeds,
+                                         self_attn_mask = attn_mask)
+        if self.training:
+            if self.img_seq_idx == 0:
+                self.query_bank.append(hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries])
+            else:
+                ori_queries = hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries]
+                self.query_bank.append(ori_queries.clone())
+                device = tgt.device
+                q_bank = torch.cat(self.query_bank, dim=1)
+                q_len = ori_queries.shape[1]
+                q_idx  = torch.arange(q_len, device=device).unsqueeze(1)          # (q,1)
+                kv_idx = (torch.arange(q_bank.shape[1], device=device) % q_len).unsqueeze(0)  # (1,kv)
+                kv_len = q_bank.size(1)       
+                bias = torch.where(q_idx == kv_idx, False, True)
+                bias = bias.expand(1, self.tracking_query_cross_attn.num_heads, q_len, kv_len).contiguous()
+                revised_queries = self.tracking_query_cross_attn(q=ori_queries, k=q_bank, v=q_bank, attn_bias=bias)
                 
-    #         ann_frame_idx = 0
-    #         ann_obj_id = np.array([i+1 for i in range(body_bbox.shape[0])])
 
-    #         # mean = torch.tensor([123.675, 116.28, 103.53]).view(3, 1, 1)
-    #         # std = torch.tensor([58.395, 57.12, 57.375]).view(3, 1, 1)
-    #         # device = _samples[0][0].device
-    #         # mean = mean.to(device)
-    #         # std = std.to(device) 
-            
-    #         # img = _samples[0][0] * std + mean
-    #         # img = torch.clamp(img, 0, 255).to(torch.uint8)
-    #         # img = img.permute(0, 2, 3, 1)  # (1, H, W, 3)
-    #         # img_np = img[0].cpu().numpy()
-
-    #         # import matplotlib.pyplot as plt
-    #         # def show_box(box, ax):
-    #         #     x0, y0 = box[0], box[1]
-    #         #     w, h = box[2] - box[0], box[3] - box[1]
-    #         #     print(x0, y0, w, h)
-    #         #     ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0, 0, 0, 0), lw=2))
-
-    #         # def show_mask(mask, ax, obj_id=None, random_color=False):
-    #         #     if random_color:
-    #         #         color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
-    #         #     else:
-    #         #         cmap = plt.get_cmap("tab10")
-    #         #         cmap_idx = 0 if obj_id is None else obj_id
-    #         #         color = np.array([*cmap(cmap_idx)[:3], 0.6])
-    #         #     h, w = mask.shape[-2:]
-    #         #     mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
-    #         #     ax.imshow(mask_image)
-
-    #         # plt.figure(figsize=(9, 9))
-    #         # plt.imshow(img_np)
-            
-
-    #         for n, (box, obj_idx) in enumerate(zip(input_boxes.cpu(), ann_obj_id)):
-    #             _, out_obj_ids, out_mask_logits = tracker.add_new_points_or_box(
-    #                 inference_state=inference_state,
-    #                 frame_idx=ann_frame_idx,
-    #                 obj_id=obj_idx,
-    #                 box=box,
-    #             )
-    #             # mask = F.interpolate(out_mask_logits[n].unsqueeze(0), size=(out_mask_logits.shape[-2], out_mask_logits.shape[-1]), mode='bilinear', align_corners=False)[0]
-    #             # show_mask((mask > 0.0).cpu().numpy(), plt.gca(), obj_id=obj_idx)
-    #             # show_box(box, plt.gca())
-
-    #         # print(f'test_mask_all_{n}.png')
-    #         # plt.savefig(f'test_mask_all_{n}.png')
-    #         # plt.close()
-    #         # import pdb; pdb.set_trace()
-
-    #         gen = tracker.propagate_in_video(inference_state, is_tqdm=False)
-    #     zipped = enumerate(zip(_samples[0], _targets[0], gen))
-
+        else:
+            print("NEED TO IMPLEMENT")
         
-    #     outputs = []
-    #     # for samples, targets in zip(_samples[0], _targets[0]):
-    #     for n, (samples, targets, (out_frame_idx, out_obj_ids, out_mask_logits)) in zipped:
-    #         assert isinstance(samples, (list, torch.Tensor))
+        reference_before_sigmoid = inverse_sigmoid(reference)
+        outputs_coords = []
+        for lvl in range(hs.shape[0]):
+            tmp = self.bbox_embed[lvl](hs[lvl])
+            tmp[..., :self.query_dim] += reference_before_sigmoid[lvl]
+            outputs_coord = tmp.sigmoid()
+            outputs_coords.append(outputs_coord)
+        pred_boxes = torch.stack(outputs_coords)
 
-    #         if self.training:
-    #             self.preprocessed_pos_lvl1 = None
+        outputs_poses = []
+        outputs_shapes = []
+        outputs_confs = []
+        outputs_j3ds = []
+        outputs_j2ds = []
+        outputs_depths = []
+        outputs_querys = []
 
-    #         elif self.preprocessed_pos_lvl1 is None and self.use_sat:
-    #             self.preprocessed_pos_lvl1 = F.interpolate(self.encoder_pos_embeds.unsqueeze(0).permute(0, 3, 1, 2),
-    #                                             mode="bicubic",
-    #                                             antialias=self.encoder.interpolate_antialias,
-    #                                             size = (int(self.feature_size[1]),int(self.feature_size[1]))).squeeze(0).permute(1,2,0)
+        # shape of hs: (lvl, bs, num_queries, dim)
+        outputs_pose_6d = self.mean_pose.view(1, 1, -1)
+        outputs_shape = self.mean_shape.view(1, 1, -1)
+        for lvl in range(hs.shape[0]):
 
-    #         final_features, pos_embeds, token_lens, scale_map_dict, sat_dict\
-    #         = self.forward_encoder(samples, targets, use_gt = sat_use_gt)
+            outputs_pose_6d = outputs_pose_6d + self.pose_head[lvl](hs[lvl])
+            outputs_shape = outputs_shape + self.shape_head[lvl](hs[lvl])
 
-    #         mask_boxes = box_xyxy_to_cxcywh(mask_to_box(out_mask_logits > 0)[:, 0, :] / self.input_size)
+            if self.training or lvl == hs.shape[0] - 1:
+                outputs_pose = rot6d_to_axis_angle(outputs_pose_6d)
 
-    #         device = samples[0].device
-    #         batch_size = len(samples)
-    #         # # SAM2 feature extraction (if sam2_feats not provided)
-    #         # sam2_feats, all_sparse_embeddings, all_dense_embeddings = self.image_encoder(
-    #         #     samples, 
-    #         #     [target['boxes'] for target in targets],
-    #         #     [target['img_size'] for target in targets],
-    #         #     device,
-    #         #     targets,
-    #         #     getattr(self, "detector", None),
-    #         # )
-            
-    #         # # SAM2 features to PHMR format conversion (batch processing)
-    #         # # image_embeddings, sparse_embeddings, dense_embeddings = self.prompt_encoder(
-    #         # image_embeddings = self.prompt_encoder(sam2_feats)
-            
-    #         # # Dense positional encoding
-    #         # image_pe = self.prompt_encoder.get_dense_pe()
+                outputs_conf = self.conf_head(hs[lvl]).sigmoid()
+                # # select_queries_idx = torch.where(outputs_conf[0] > 0.5)[0]
+                # outputs_pose_6d[0][select_queries_idx]
+                # import pdb; pdb.set_trace()
 
-    #         bs = len(targets)
+                # cam
+                cam_xys = self.cam_head(hs[lvl])
 
-    #         # get cam_intrinsics
-    #         img_size = torch.stack([t['img_size'].flip(0) for t in targets])
-    #         valid_ratio = img_size/self.input_size
-            
-    #         cam_intrinsics = self.cam_intrinsics.repeat(bs, 1, 1, 1)
-    #         cam_intrinsics[...,:2,2] = cam_intrinsics[...,:2,2] * valid_ratio[:, None, :]
-            
-    #         # self.get_all_outputs(inference_state)
-
-    #         # self.mask_mem_projector
-
-    #         pr_tgt, pr_points, pr_attn_mask, prompt_dn_meta =\
-    #                             prepare_prompt_query_box(targets, self.dn_cfg, num_queries=self.num_queries, 
-    #                             # hidden_dim = self.hidden_dim, prompt_encoder=self.prompt_encoder, dn_prompt_enc = self.dn_prompt_enc)
-    #                             hidden_dim = self.hidden_dim, mask_encoder=self.mask_encoder,
-    #                             mask_boxes=mask_boxes, masks=out_mask_logits)
-    #                             # sparse_embeddings=all_sparse_embeddings)
-    #         embedweight = (self.refpoint_embed.weight).unsqueeze(0).repeat(bs,1,1)
-    #         tgt = (self.tgt_embed.weight).unsqueeze(0).repeat(bs,1,1)
-    #         # pr_tgt = self.prompt_cross_attn(pr_tgt, tgt)
-
-    #         # pr_points = self.prompt_cross_attn_points(pr_points, embedweight)
-
-    #         # device = tgt.device
-    #         # dn_pad = dn_meta['pad_size']                 # single_pad * 2 * dn_number
-    #         # pr_pad = pr_meta['pad_size']
-    #         # tgt_size = dn_pad + pr_pad
-
-    #         """
-    #         TEST: bbox and mask
-    #         #####
-    #         #####
-    #         #####
-    #         #####s
-    #         #####
-    #         """
-
-    #         # boxes_cxcywh = targets[i]['boxes']
-    #         # boxes_xyxy = torch.cat([
-    #         #     boxes_cxcywh[:, :2] - boxes_cxcywh[:, 2:] / 2,  # x1y1
-    #         #     boxes_cxcywh[:, :2] + boxes_cxcywh[:, 2:] / 2   # x2y2
-    #         # ], dim=1)
-    #         # targets[i]['boxes'] = boxes_xyxy
-
-    #         if self.training and self.use_dn:
-    #             input_query_tgt, input_query_bbox, dn_attn_mask, dn_meta =\
-    #                             prepare_for_cdn(targets = targets, dn_cfg = self.dn_cfg, 
-    #                                         num_queries = self.num_queries, hidden_dim = self.hidden_dim, dn_enc = self.dn_enc)
-    #             tgt = torch.cat([input_query_tgt, pr_tgt, tgt], dim=1)
-    #             embedweight = torch.cat([input_query_bbox, pr_points, embedweight], dim=1)
-
-    #             dn_pad = dn_meta['pad_size']
-    #             pr_pad = prompt_dn_meta['pad_size']
-    #             num_queries = self.num_queries
-    #             N = dn_pad + pr_pad + num_queries
-    #             device = dn_attn_mask.device
-
-    #             dn_s, dn_e = 0, dn_pad
-    #             pr_s, pr_e = dn_e, dn_e + pr_pad
-    #             or_s, or_e = pr_e, pr_e + num_queries
-
-    #             attn_mask = torch.zeros((N, N), dtype=torch.bool, device=device)
-    #             # attn_mask[:dn_pad, dn_pad:N] = True
-    #             # attn_mask[dn_pad:N, :dn_pad] = True
-
-    #             # DN ↔ PR
-    #             attn_mask[dn_s:dn_e, pr_s:pr_e] = True
-    #             attn_mask[pr_s:pr_e, dn_s:dn_e] = True
-    #             # DN ↔ ORIG
-    #             attn_mask[dn_s:dn_e, or_s:or_e] = True
-    #             attn_mask[or_s:or_e, dn_s:dn_e] = True
-
-    #             block_pr_orig = False # 2) PR ↔ ORIG Block 
-    #             if pr_pad > 0 and num_queries > 0 and block_pr_orig:
-    #                 attn_mask[pr_s:pr_e, or_s:or_e] = True
-    #                 attn_mask[or_s:or_e, pr_s:pr_e] = True
-
-    #             # Intra attn mask or block self attn
-    #             dn_block = dn_attn_mask[:dn_pad, :dn_pad] if dn_pad > 0 else None
-    #             pr_block = pr_attn_mask[:pr_pad, :pr_pad] if pr_pad > 0 else None
-
-    #             if dn_block is not None:
-    #                 attn_mask[:dn_pad, :dn_pad] |= dn_block
-
-    #             if pr_block is not None:
-    #                 attn_mask[dn_pad:dn_pad+pr_pad, dn_pad:dn_pad+pr_pad] |= pr_block
-    #         else:
-    #             pr_pad = prompt_dn_meta['pad_size']
-    #             attn_mask = pr_attn_mask[:pr_pad, :pr_pad] if pr_pad > 0 else None
-
-    #             tgt = torch.cat([pr_tgt, tgt], dim=1)                       # [B, pr_pad + num_queries, C]
-    #             embedweight = torch.cat([pr_points, embedweight], dim=1)  # [B, pr_pad + num_queries, ...] (ref coords)
-
-    #             pr_pad = prompt_dn_meta['pad_size']          
-    #             num_queries = self.num_queries               
-    #             N = pr_pad + num_queries
-    #             device = pr_tgt.device
-
-    #             pr_s, pr_e = 0, pr_pad
-    #             or_s, or_e = pr_e, pr_e + num_queries
-
-    #             attn_mask = torch.zeros((N, N), dtype=torch.bool, device=device)
-    #             pr_block = pr_attn_mask[:pr_pad, :pr_pad] if pr_pad > 0 and pr_attn_mask is not None else None
-    #             if pr_block is not None:
-    #                 attn_mask[pr_s:pr_e, pr_s:pr_e] |= pr_block
-    #             # attn_mask = None
-
-    #         # embedweight = (self.refpoint_embed.weight).unsqueeze(0).repeat(bs,1,1)
-    #         # tgt = (self.tgt_embed.weight).unsqueeze(0).repeat(bs,1,1)
-
-    #         # if self.training and self.use_dn:
-    #         #     input_query_tgt, input_query_bbox, attn_mask, dn_meta =\
-    #         #                     prepare_for_cdn(targets = targets, dn_cfg = self.dn_cfg, 
-    #         #                                 num_queries = self.num_queries, hidden_dim = self.hidden_dim, dn_enc = self.dn_enc)
-    #         #     tgt = torch.cat([input_query_tgt, tgt], dim=1)
-    #         #     embedweight = torch.cat([input_query_bbox, embedweight], dim=1)
-    #         # else:
-    #         #     attn_mask = None
-
-    #         tgt_lens = [tgt.shape[1]]*bs
-
-    #         hs, reference = self.decoder(memory=final_features, memory_lens=token_lens,
-    #                                         tgt=tgt.flatten(0,1), tgt_lens=tgt_lens,
-    #                                         refpoint_embed=embedweight.flatten(0,1),
-    #                                         pos_embed=pos_embeds,
-    #                                         self_attn_mask = attn_mask)
-
-    #         reference_before_sigmoid = inverse_sigmoid(reference)
-    #         outputs_coords = []
-    #         for lvl in range(hs.shape[0]):
-    #             tmp = self.bbox_embed[lvl](hs[lvl])
-    #             tmp[..., :self.query_dim] += reference_before_sigmoid[lvl]
-    #             outputs_coord = tmp.sigmoid()
-    #             outputs_coords.append(outputs_coord)
-    #         pred_boxes = torch.stack(outputs_coords)
-
-    #         # tracker.sam_prompt_encoder.mask_downscaling(out_mask_logits.clone())
-
-    #         outputs_poses = []
-    #         outputs_shapes = []
-    #         outputs_confs = []
-    #         outputs_j3ds = []
-    #         outputs_j2ds = []
-    #         outputs_depths = []
-
-    #         # shape of hs: (lvl, bs, num_queries, dim)
-    #         outputs_pose_6d = self.mean_pose.view(1, 1, -1)
-    #         outputs_shape = self.mean_shape.view(1, 1, -1)
-    #         for lvl in range(hs.shape[0]):
-
-    #             outputs_pose_6d = outputs_pose_6d + self.pose_head[lvl](hs[lvl])
-    #             outputs_shape = outputs_shape + self.shape_head[lvl](hs[lvl])
-
-    #             if self.training or lvl == hs.shape[0] - 1:
-    #                 outputs_pose = rot6d_to_axis_angle(outputs_pose_6d)
-
-    #                 outputs_conf = self.conf_head(hs[lvl]).sigmoid()
-
-    #                 # cam
-    #                 cam_xys = self.cam_head(hs[lvl])
-
-                    
-    #                 outputs_vert, outputs_j3d, outputs_j2d, depth, transl\
-    #                 = self.process_smpl(poses = outputs_pose,
-    #                                     shapes = outputs_shape,
-    #                                     cam_xys = cam_xys,
-    #                                     cam_intrinsics = cam_intrinsics,
-    #                                     detach_j3ds = detach_j3ds)
-                    
-    #                 outputs_poses.append(outputs_pose)
-    #                 outputs_shapes.append(outputs_shape)
-    #                 outputs_confs.append(outputs_conf)
-    #                 # outputs_verts.append(outputs_vert)
-    #                 outputs_j3ds.append(outputs_j3d)
-    #                 outputs_j2ds.append(outputs_j2d)
-    #                 outputs_depths.append(depth)
-            
-    #         pred_poses = torch.stack(outputs_poses)
-    #         pred_betas = torch.stack(outputs_shapes)
-    #         pred_confs = torch.stack(outputs_confs)
-    #         pred_verts = outputs_vert
-    #         pred_transl = transl
-    #         pred_intrinsics = cam_intrinsics
-    #         pred_j3ds = torch.stack(outputs_j3ds)
-    #         pred_j2ds = torch.stack(outputs_j2ds)
-    #         pred_depths = torch.stack(outputs_depths)
-
-    #         if self.training > 0 and self.use_dn:
-    #             pred_poses, pred_betas,\
-    #             pred_boxes, pred_confs,\
-    #             pred_j3ds, pred_j2ds, pred_depths,\
-    #             pred_verts, pred_transl =\
-    #                 dn_post_process(pred_poses, pred_betas,
-    #                                 pred_boxes, pred_confs,
-    #                                 pred_j3ds, pred_j2ds, pred_depths,
-    #                                 pred_verts, pred_transl,
-    #                                 dn_meta, self.aux_loss, self._set_aux_loss)
+                outputs_vert, outputs_j3d, outputs_j2d, depth, transl\
+                = self.process_smpl(poses = outputs_pose,
+                                    shapes = outputs_shape,
+                                    cam_xys = cam_xys,
+                                    cam_intrinsics = cam_intrinsics,
+                                    detach_j3ds = detach_j3ds)
+                
+                outputs_querys.append(hs[lvl])
+                outputs_poses.append(outputs_pose)
+                outputs_shapes.append(outputs_shape)
+                outputs_confs.append(outputs_conf)
+                # outputs_verts.append(outputs_vert)
+                outputs_j3ds.append(outputs_j3d)
+                outputs_j2ds.append(outputs_j2d)
+                outputs_depths.append(depth)
+        
+        pred_poses = torch.stack(outputs_poses)
+        pred_betas = torch.stack(outputs_shapes)
+        pred_confs = torch.stack(outputs_confs)
+        pred_verts = outputs_vert
+        pred_transl = transl
+        pred_intrinsics = cam_intrinsics
+        pred_j3ds = torch.stack(outputs_j3ds)
+        pred_j2ds = torch.stack(outputs_j2ds)
+        pred_depths = torch.stack(outputs_depths)
+        pred_querys = torch.stack(outputs_querys)
 
 
-    #         out = {'pred_poses': pred_poses[-1], 'pred_betas': pred_betas[-1],
-    #                 'pred_boxes': pred_boxes[-1], 'pred_confs': pred_confs[-1], 
-    #             'pred_j3ds': pred_j3ds[-1], 'pred_j2ds': pred_j2ds[-1],
-    #             'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
-    #             'pred_depths': pred_depths[-1], 'pred_transl': pred_transl}
-            
-    #         if self.aux_loss and self.training:
-    #             out['aux_outputs'] = self._set_aux_loss(pred_poses, pred_betas,
-    #                                                     pred_boxes, pred_confs,
-    #                                                     pred_j3ds, pred_j2ds, pred_depths)
+        if self.training > 0 and self.use_dn:
+            pred_poses, pred_betas,\
+            pred_boxes, pred_confs,\
+            pred_j3ds, pred_j2ds, pred_depths,\
+            pred_verts, pred_transl =\
+                dn_post_process(pred_poses, pred_betas,
+                                pred_boxes, pred_confs,
+                                pred_j3ds, pred_j2ds, pred_depths,
+                                pred_verts, pred_transl,
+                                dn_meta, self.aux_loss, self._set_aux_loss)
 
-    #         if self.use_sat:
-    #             out['enc_outputs'] = scale_map_dict
-            
-    #         out['sat'] = sat_dict
+        # if self.training > 0:
+        #     pred_poses, pred_betas,\
+        #     pred_boxes, pred_confs,\
+        #     pred_j3ds, pred_j2ds, pred_depths,\
+        #     pred_verts, pred_transl =\
+        #         dn_post_process(pred_poses, pred_betas,
+        #                         pred_boxes, pred_confs,
+        #                         pred_j3ds, pred_j2ds, pred_depths,
+        #                         pred_verts, pred_transl,
+        #                         prompt_dn_meta, self.aux_loss, self._set_aux_loss)
 
-    #         if self.training > 0 and self.use_dn:
-    #             out['dn_meta'] = dn_meta
-    #         outputs.append(out)
+        # import matplotlib.pyplot as plt
+        # x_sorted, _ = torch.sort(pred_confs[-1].squeeze(), descending=True)
 
-    #     return outputs
+        # def knee_threshold(scores: torch.Tensor):
+        #     s, _ = torch.sort(scores, descending=True)
+        #     N = len(s)
+        #     x = torch.linspace(0, 1, N, device=s.device)
+        #     y = (s - s.min()) / (s.max() - s.min())  # normalize
+        #     line = y[0] + (y[-1] - y[0]) * x
+        #     diff = line - y                          
+        #     i_star = torch.argmax(diff).item()
+        #     tau = s[i_star].item()
+        #     return tau, i_star
+
+        # tau, i_star = knee_threshold(x_sorted)
+        # # if self.tracker.frame_id != 0:
+        # #     self.tracker.conf_thresh = tau
+        # # else:
+        # #     self.tracker.conf_thresh = tau + 0.2
+
+        # plt.figure(figsize=(6,4))
+        # plt.plot(range(len(x_sorted.squeeze().cpu().numpy())), x_sorted.squeeze().cpu().numpy(), marker='o', markersize=3, linewidth=1)
+        # # plt.axvline(i_star, color='red', linestyle='--', label=f'knee index = {i_star}')
+        # # plt.axhline(tau, color='orange', linestyle='--', label=f'tau = {tau:.3f}')
+        # plt.savefig(f'linecharts/thresholding_{self.tracker.frame_id}.jpg')
+
+        out = {'pred_poses': pred_poses[-1], 'pred_betas': pred_betas[-1],
+                'pred_boxes': pred_boxes[-1], 'pred_confs': pred_confs[-1], 
+               'pred_j3ds': pred_j3ds[-1], 'pred_j2ds': pred_j2ds[-1],
+               'pred_verts': pred_verts, 'pred_intrinsics': pred_intrinsics, 
+               'pred_depths': pred_depths[-1], 'pred_transl': pred_transl,
+               'img': samples}
+        if self.training:
+            out['kept_indices'] = self._kept_indices
+        # Posetrack 0.1 and bedlam 0.05
+        j2d_boxes = j2ds_to_bboxes_xywh(out['pred_j2ds'][-1], 0.1)[None]
+        out['pred_j2d_boxes'] = j2d_boxes
+        out['pred_querys'] = pred_querys[-1]
+        
+        if self.aux_loss and self.training:
+            out['aux_outputs'] = self._set_aux_loss(pred_poses, pred_betas,
+                                                    pred_boxes, pred_confs,
+                                                    pred_j3ds, pred_j2ds, pred_depths)
+
+        if self.use_sat:
+            out['enc_outputs'] = scale_map_dict
+        
+        out['sat'] = sat_dict
+
+        # out['pr_dn_meta'] = prompt_dn_meta
+
+        if self.training > 0 and self.use_dn:
+            out['dn_meta'] = dn_meta
+
+        if not self.training and hasattr(self, 'is_tracking_eval') and self.is_tracking_eval:
+            B = out['pred_confs'].shape[0]
+            keep_indices_per_b = []
+            keep_track_ids_per_b = []
+            keep_origin_qidx_per_b = []
+
+            for b in range(B):
+                confs = out['pred_confs'][b].squeeze(-1) if out['pred_confs'][b].dim()>1 else out['pred_confs'][b]  # [Q]
+                
+                # if hasattr(self.tracker, 'is_add_new') not self.tracker.is_add_new:
+                #     boxes = out['pred_boxes'][b] * self.input_size  # [Q,4]
+                # else:
+                boxes = out['pred_j2d_boxes'][b]
+                kp2ds = out['pred_j2ds'][b]
+                Q = boxes.size(0)
+                qidx = torch.arange(Q, device=boxes.device)
+                querys = out['pred_querys']
+
+
+                # image_np = samples[0].detach().to("cpu").permute(1, 2, 0).numpy()
+                # mean = torch.tensor([123.675, 116.28, 103.53]).view(3, 1, 1).to(samples[0].device)
+                # std = torch.tensor([58.395, 57.12, 57.375]).view(3, 1, 1).to(samples[0].device)
+                # img = samples[0] * std + mean
+                # img = torch.clamp(img, 0, 255).to(torch.uint8).detach().to("cpu").permute(1, 2, 0).numpy()
+                # image_np = img[:, :, ::-1]  # RGB2BGR
+                # shots = self.shot_detector.process_frame(self.frame_count, image_np)
+
+                # self.frame_count += 1
+                # is_new_shot = len(shots) > 1 if self.frame_count > 1 else False
+                # print(self.frame_count, is_new_shot)
+
+                # if seq_start and b == 0:
+                #     mask = confs >= self.conf_thresh
+                #     _ = self.tracker.init_frame(
+                #         kp2ds[mask], boxes[mask], confs[mask], qidx[mask], nms_iou=0.5
+                #     )
+
+                # active_ids, id2qidx, id2origin = self.tracker.update(kp2ds, boxes, confs, qidx)
+                if hasattr(self.tracker, 'is_add_new') and not self.tracker.is_add_new:
+                    gt_boxes = box_cxcywh_to_xyxy(targets[0]['boxes'])
+                    gt_boxes[:, 0] = gt_boxes[:, 0] * self.input_size
+                    gt_boxes[:, 1] = gt_boxes[:, 1] * self.input_size
+                    gt_boxes[:, 2] = gt_boxes[:, 2] * self.input_size
+                    gt_boxes[:, 3] = gt_boxes[:, 3] * self.input_size
+                    active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=querys, gt_boxes=gt_boxes)
+                else:
+                    active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=querys)
+
+                if len(id2qidx) == 0:
+                    keep_indices = torch.empty((0,), dtype=torch.long, device=boxes.device)
+                    keep_track_ids = []
+                    keep_origin_qidx = torch.empty((0,), dtype=torch.long, device=boxes.device)
+                else:
+                    ordered_ids = sorted(id2qidx.keys())
+                    keep_indices = torch.tensor(
+                        [id2qidx[tid] for tid in ordered_ids],
+                        dtype=torch.long, device=boxes.device
+                    )
+                    keep_origin_qidx = torch.tensor(
+                        [id2origin[tid] for tid in ordered_ids],
+                        dtype=torch.long, device=boxes.device
+                    )
+                    keep_track_ids = ordered_ids
+
+                keep_indices_per_b.append(keep_indices)
+                keep_track_ids_per_b.append(keep_track_ids)
+                keep_origin_qidx_per_b.append(keep_origin_qidx)
+
+            def _slice_field(field):
+                if field not in out or out[field] is None:
+                    return
+                x = out[field]
+                if not torch.is_tensor(x):
+                    return
+
+                if x.dim() >= 2 and x.size(0) == B:
+                    sliced_tensors = []
+                    for b in range(B):
+                        idxs = keep_indices_per_b[b]  # (Kb,)
+                        xb = x[b]
+                        if idxs.numel() == 0:
+                            empty_shape = (0,) + xb.shape[1:]
+                            sliced_tensors.append(xb.new_empty(empty_shape))
+                        else:
+                            sliced_tensors.append(xb.index_select(0, idxs))
+                    out[field] = torch.stack(sliced_tensors, dim=0)
+
+                elif x.dim() >= 1 and (B == 1):
+                    idxs = keep_indices_per_b[0]
+                    if idxs.numel() == 0:
+                        empty_shape = (0,) + x.shape[1:]
+                        out[field] = x.new_empty(empty_shape)
+                    else:
+                        out[field] = x.index_select(0, idxs)
+                else:
+                    return
+
+            for key in [
+                'pred_poses','pred_betas','pred_boxes','pred_confs',
+                'pred_j3ds','pred_j2ds','pred_depths','pred_verts',
+                'pred_transl', 'pred_j2d_boxes'
+            ]:
+                _slice_field(key)
+
+            out['track_keep_indices'] = keep_indices_per_b                  # list of LongTensor (per B)
+            out['track_origin_qidx']  = keep_origin_qidx_per_b              # list of LongTensor (per B)
+            out['track_ids']          = keep_track_ids_per_b   
+            out['active_ids'] = active_ids
+            out['ori_pred_boxes'] = pred_boxes[-1]
+
+        return out
+   
+    
 
     @torch.jit.unused
     def _set_aux_loss(self, pred_poses, pred_betas, pred_boxes, 
@@ -1543,14 +1211,13 @@ class MLP(nn.Module):
         return x
 
 
-def build_sat_pr_sam2_model(args, set_criterion=True):
+def build_sat_video_model(args, set_criterion=True):
     encoder = build_encoder(args)
     decoder = build_decoder(args)
 
     model = VideoModel(
         encoder,
         decoder,
-        aux_loss=args.aux_loss if hasattr(args, 'aux_loss') else False,
         num_queries=args.num_queries,
         input_size=args.input_size,
         sat_cfg=args.sat_cfg,
@@ -1575,11 +1242,12 @@ def build_sat_pr_sam2_model(args, set_criterion=True):
         weight_dict.update(aux_weight_dict)
 
         if args.sat_cfg['use_sat']:
-            if 'map_confs' not in weight_dict:
+            if 'map_confs' not in weight_dict and 'confs' in weight_dict:
                 weight_dict.update({'map_confs': weight_dict['confs']})
             # weight_dict.update({'map_scales': })
 
-        criterion = SetCriterion_SATPR(matcher, weight_dict, losses = losses, j2ds_norm_scale = args.input_size, num_queries = args.num_queries)
+        criterion = SetCriterion_SATPR_IMG(matcher, weight_dict, losses = losses, j2ds_norm_scale = args.input_size, num_queries = args.num_queries)
+        # criterion = SetCriterion(matcher, weight_dict, losses = losses, j2ds_norm_scale = args.input_size)
         return model, criterion
     else:
         return model, None

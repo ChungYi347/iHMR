@@ -196,6 +196,65 @@ class Attention(nn.Module):
         return x
 
 
+class CrossAttention(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = False,
+        proj_bias: bool = True,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        mask_k_bias: bool = False,
+    ) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim**-0.5
+
+        linear_class = LinearKMaskedBias if mask_k_bias else nn.Linear
+        self.wq = linear_class(dim, dim, bias=qkv_bias)
+        self.wk = linear_class(dim, dim, bias=qkv_bias)
+        self.wv = linear_class(dim, dim, bias=qkv_bias)
+        # self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim, bias=proj_bias)
+        # self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, q, k, v, attn_bias) -> Tensor:
+        B, N, C = q.shape
+        _, N_K, C = k.shape
+        # qkv = qkv_layer(x).reshape(B, N, 3, num_heads, C // num_heads)
+        q = self.wq(q)
+        k = self.wk(k)
+        v = self.wv(v)
+        D = C // self.num_heads
+        scale = 1.0 / (D ** 0.5)
+
+        q = q.reshape(B, N, self.num_heads, C // self.num_heads) * scale
+        k = k.reshape(B, N_K, self.num_heads, C // self.num_heads)
+        v = v.reshape(B, N_K, self.num_heads, C // self.num_heads) 
+        q = q.permute(0, 2, 1, 3) 
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+
+        # (B, H, N, N)
+        attn = torch.matmul(q, k.transpose(-2, -1))
+
+        if attn_bias is not None:
+            attn = attn + attn_bias.to(dtype=attn.dtype, device=attn.device)
+
+        attn = attn.softmax(dim=-1)
+        # attn = self.attn_drop(attn)
+
+        # (B, H, N, D)
+        x = torch.matmul(attn, v)
+        # (B, N, C)
+        x = x.transpose(1, 2).reshape(B, N, C)
+        # x = self.proj_drop(self.proj(x))
+        x = self.proj(x)
+        return x
+
+
 class MemEffAttention(Attention):
     def forward(self, x: Tensor, attn_bias=None) -> Tensor:
         if not XFORMERS_AVAILABLE:

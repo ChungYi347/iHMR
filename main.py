@@ -38,7 +38,7 @@ if __name__ == '__main__':
     args.exp_name = args.cfg
 
     if hasattr(args, 'model_type') and args.model_type == "sat_pr_sam2":
-        args = update_args(args, os.path.join('configs', 'models', f'{args.model}_sam2.yaml'))
+        args = update_args(args, os.path.join('configs', 'models', f'{args.model}_video.yaml'))
     else:
         args = update_args(args, os.path.join('configs', 'models', f'{args.model}.yaml'))
     
@@ -68,6 +68,13 @@ if __name__ == '__main__':
         engine = Engine(args, mode='eval_posetrack_video')
         engine.eval_posetrack_video(args)
 
+    elif args.mode.lower() == 'eval_3dpw_track':
+        engine = Engine(args, mode='eval_3dpw_track')
+        engine.eval_3dpw_track(args)
+
+    elif args.mode.lower() == 'eval_bedlam_track':
+        engine = Engine(args, mode='eval_bedlam_track')
+        engine.eval_bedlam_track(args)
     else:
         print('Wrong mode!')
         exit(1)

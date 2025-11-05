@@ -106,3 +106,102 @@ def build_matcher(args):
         cost_kpts=args.set_cost_kpts,
         j2ds_norm_scale=args.input_size
     )
+
+@torch.no_grad()
+def align_object_order_across_frames(
+    meta_seq,
+    j2ds_norm_scale: float = 518.0,
+    w_kpts: float = 10.0,
+    w_bbox: float = 1.0,
+    w_giou: float = 1.0,
+    inplace: bool = True,
+):
+    def _to_tensor(x):
+        return torch.as_tensor(x).float()
+
+    def _pack(objs, k_use=22):
+        N = len(objs)
+        if N == 0:
+            return (torch.empty(0,4), torch.empty(0,22,2), torch.empty(0,22,2))
+        boxes = torch.stack([_to_tensor(o['boxes']) for o in objs], dim=0)  # [N,4] (cx,cy,w,h)
+        if 'j2ds' in objs[0]:
+            K = min(k_use, _to_tensor(objs[0]['j2ds']).shape[0])
+            j2ds  = torch.stack([_to_tensor(o['j2ds'])[:K]  for o in objs], dim=0)  # [N,K,2]
+            if 'j2ds_mask' in objs[0]:
+                jmask = torch.stack([_to_tensor(o['j2ds_mask'])[:K] for o in objs], dim=0)  # [N,K,2]
+            else:
+                jmask = torch.ones_like(j2ds)
+        else:
+            K = 0
+            j2ds  = torch.empty(N,0,2)
+            jmask = torch.empty(N,0,2)
+        return boxes, j2ds, jmask
+
+    def _cost_matrix(cur_objs, prev_objs):
+        cur_b, cur_j, cur_m = _pack(cur_objs)
+        prev_b, prev_j, prev_m = _pack(prev_objs)
+
+        Nc, Np = cur_b.shape[1], prev_b.shape[1]
+        if Nc == 0 or Np == 0:
+            return torch.zeros(Nc, Np)
+
+        # bbox L1
+        cost_bbox = torch.cdist(cur_b, prev_b, p=1)  # [Nc,Np]
+
+        try:
+            giou = generalized_box_iou(
+                box_cxcywh_to_xyxy(cur_b)[0],
+                box_cxcywh_to_xyxy(prev_b)[0],
+            )
+            cost_giou = -giou[None]
+        except Exception:
+            cost_giou = torch.zeros_like(cost_bbox)
+
+        if cur_j.numel() > 0 and prev_j.numel() > 0:
+            # [Nc,K,2] -> [Nc,2K]
+            cur_flat  = (cur_j.reshape(Nc, -1)  / j2ds_norm_scale)
+            prev_flat = (prev_j.reshape(Np, -1) / j2ds_norm_scale)
+            prev_mflat = prev_m.reshape(Np, -1)
+            vis_cnt = prev_mflat.sum(-1).clamp_min(1.0)  # [Np]
+
+            # [Nc,Np,2K]
+            all_dist = (cur_flat[:, None, :] - prev_flat[None, :, :]).abs()
+            cost_kpts = (all_dist * prev_mflat[None, :, :]).sum(-1) / vis_cnt[None, :]
+        else:
+            cost_kpts = torch.zeros_like(cost_bbox)
+
+        C = w_bbox*cost_bbox + w_giou*cost_giou + w_kpts*cost_kpts[None]
+        return C
+
+    seq = meta_seq if inplace else [list(frame) for frame in meta_seq]
+    if len(seq) <= 1:
+        return seq
+
+    prev = seq[0]
+    for t in range(1, len(seq)):
+        cur = list(seq[t])
+
+        C = _cost_matrix(cur, prev).cpu().numpy()  # rows=cur, cols=prev
+        if C.size == 0:
+            seq[t] = cur
+            prev = seq[t]
+            continue
+
+        r_idx, c_idx = linear_sum_assignment(C[0])  # cur i -> prev j 매칭
+        new_cur = [None] * len(prev)
+        used_rows = set()
+        for r, c in zip(r_idx, c_idx):
+            if c < len(new_cur):
+                new_cur[c] = cur[r]
+            used_rows.add(r)
+
+        for i in range(len(cur)):
+            if i not in used_rows:
+                new_cur.append(cur[i])
+
+        new_cur = [o for o in new_cur if o is not None]
+
+        seq[t] = new_cur
+        prev = seq[t]
+
+    return seq
