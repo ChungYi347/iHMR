@@ -1,4 +1,4 @@
-wandb_logging: false 
+wandb_logging: true
 seed: 42
 model: default
 
