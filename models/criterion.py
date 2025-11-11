@@ -1341,11 +1341,10 @@ class SetCriterion_SATPR_IMG(nn.Module):
                 detection_valid_mask[cur:cur+lens[i]] = True
             cur += lens[i]
 
-     
+        pred_scale_map = pred_map[:,0]
         losses = {}
-        losses['map_confs'] = focal_loss(pred_map[:,0], labels, valid_mask=detection_valid_mask)/1.
+        losses['map_confs'] = focal_loss(pred_scale_map, labels, valid_mask=detection_valid_mask)/1.
         losses['map_scales'] = torch.abs((pred_scales - tgt_scales)[torch.where(labels)[0]]).sum()/num_instances
-
 
         return losses
 
@@ -1373,7 +1372,6 @@ class SetCriterion_SATPR_IMG(nn.Module):
             losses[loss] = focal_loss(pred_confs, labels) / num_instances
         else:
             losses[loss] = focal_loss(pred_confs, labels, valid_mask = detection_valid_mask) / num_instances
-
         return losses
 
     def loss_normalized_depths(self, loss, outputs, targets, indices, num_instances, **kwargs):
@@ -1426,10 +1424,13 @@ class SetCriterion_SATPR_IMG(nn.Module):
         }
         # assert loss in loss_map, f'do you really want to compute {loss} loss?'
         if len(indices) == 0:
-            return {loss: torch.zeros(1, dtype=torch.float32, device=self.device)}
+            if loss == "scale_map":
+                return {'map_scales': torch.zeros(1, dtype=torch.float32, device=self.device), 
+                        'map_confs': torch.zeros(1, dtype=torch.float32, device=self.device)}
+            else:
+                return {loss: torch.zeros(1, dtype=torch.float32, device=self.device)}
         else:
             return loss_map[loss](loss, outputs, targets, indices, num_instances, **kwargs)
-
 
     def get_valid_instances(self, targets):
         # Compute the average number of GTs accross all nodes, for normalization purposes
@@ -1572,7 +1573,7 @@ class SetCriterion_SATPR_IMG(nn.Module):
             pr_loss = self.get_loss(loss, outputs_pr, targets, pr_indices, num_valid_instances[loss], is_pn=True)
             pr_loss = {f'{k}_pr': v for k, v in pr_loss.items()}
             losses.update(pr_loss)
-        
+            
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):

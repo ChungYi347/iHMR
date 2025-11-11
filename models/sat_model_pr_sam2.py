@@ -56,6 +56,7 @@ from einops import rearrange
 from models.encoders.dinov2.layers import MemEffCrossAttention, SelfAttention, MemEffCrossAttentionWeight, CrossAttention
 from models.utils import MaskEncoder
 from scipy.optimize import linear_sum_assignment 
+from collections import defaultdict
 
 
 
@@ -95,6 +96,49 @@ def pairwise_iou(boxes1, boxes2):
     iou[valid] = inter[valid] / union[valid]
     return iou
 
+def get_similarity(mk: torch.Tensor,
+                   ms: torch.Tensor,
+                   qk: torch.Tensor,
+                   qe: torch.Tensor,
+                   add_batch_dim=False) -> torch.Tensor:
+    # used for training/inference and memory reading/memory potentiation
+    # mk: B x CK x [N]    - Memory keys
+    # ms: B x  1 x [N]    - Memory shrinkage
+    # qk: B x CK x [HW/P] - Query keys
+    # qe: B x CK x [HW/P] - Query selection
+    # Dimensions in [] are flattened
+    if add_batch_dim:
+        mk, ms = mk.unsqueeze(0), ms.unsqueeze(0)
+        qk, qe = qk.unsqueeze(0), qe.unsqueeze(0)
+
+    CK = mk.shape[1]
+    mk = mk.flatten(start_dim=2)
+    ms = ms.flatten(start_dim=1).unsqueeze(2) if ms is not None else None
+    qk = qk.flatten(start_dim=2)
+    qe = qe.flatten(start_dim=2) if qe is not None else None
+
+    if qe is not None:
+        # See XMem's appendix for derivation
+        mk = mk.transpose(1, 2)
+        a_sq = (mk.pow(2) @ qe)
+        two_ab = 2 * (mk @ (qk * qe))
+        b_sq = (qe * qk.pow(2)).sum(1, keepdim=True)
+        similarity = (-a_sq + two_ab - b_sq)
+    else:
+        # similar to STCN if we don't have the selection term
+        a_sq = mk.pow(2).sum(1).unsqueeze(2)
+        two_ab = 2 * (mk.transpose(1, 2) @ qk)
+        similarity = (-a_sq + two_ab)
+
+    if ms is not None:
+        similarity = similarity * ms / math.sqrt(CK)  # B*N*HW
+    else:
+        similarity = similarity / math.sqrt(CK)  # B*N*HW
+
+    return similarity
+
+
+
 
 class VideoModel(nn.Module):
     """ One-stage Multi-person Human Mesh Estimation via Scale-adaptive Tokens """
@@ -111,7 +155,8 @@ class VideoModel(nn.Module):
                     random_refpoints_xy=False,
                     num_poses=24,
                     dim_shape=10,
-                    FOV=pi/3
+                    FOV=pi/3,
+                    memory_update_type='sim',
                     ):
         """ Initializes the model.
         Parameters:
@@ -309,7 +354,9 @@ class VideoModel(nn.Module):
 
         self.ema_factor = 0.8
 
-        self.tracking_query_cross_attn = CrossAttention(hidden_dim)
+        self.memory_update_type = memory_update_type
+        if self.memory_update_type != "sim":
+            self.tracking_query_cross_attn = CrossAttention(hidden_dim)
         
     def lvl_pooling(self, tokens):
         assert len(tokens)%4 == 0
@@ -710,10 +757,30 @@ class VideoModel(nn.Module):
                 # prev_boxes = [box_xyxy_to_cxcywh(v['prev_box'] / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
                 
                 # _boxes = [box_cxcywh_to_xyxy(v['kf'].get_xyxy() / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
-                # _boxes = [t['boxes'] for t in targets]
-                _boxes = [box_xyxy_to_cxcywh(v['box'] / self.input_size) for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age]
-                
+                # __boxes = [t['boxes'] for t in targets]
+                # _boxes = list(__boxes[0].to(device=tgt.device).unbind(0))
+                # print(_boxes)
 
+                # _boxes = [box_xyxy_to_cxcywh(v['box']) / self.input_size for k, v in self.tracker.tracks.items() if v['age'] == 0 ]
+                # print(_boxes)
+                # _boxes = [
+                #     (box_xyxy_to_cxcywh(v['box']) / self.input_size) * torch.tensor([1, 1, 1.2, 1.2], device=v['box'].device)
+                #     for k, v in self.tracker.tracks.items()  if v['age'] == 0
+                # ]
+                _boxes = [v['box'] for k, v in self.tracker.tracks.items() if v['age'] == 0 ]
+                if len(_boxes) !=0:
+                    imght, imgwidth = targets[0]['img_size']
+                    # imght, imgwidth = meta_data['img_size']
+                    _boxes = box_xyxy_to_cxcywh(torch.stack(_boxes)) / self.input_size
+                    _boxes[...,2:] *= 1.2
+                    _boxes = box_cxcywh_to_xyxy(_boxes)
+                    _boxes[...,[0,2]] = _boxes[...,[0,2]].clamp(min=0.000001,max=(imgwidth-1)/self.input_size)
+                    _boxes[...,[1,3]] = _boxes[...,[1,3]].clamp(min=0.000001,max=(imght-1)/self.input_size)
+                    _boxes = box_xyxy_to_cxcywh(_boxes)
+                    # print(_boxes)
+                    # print([v['box'] for k, v in self.tracker.tracks.items() if v['age'] < self.tracker.max_age])
+
+            pr_tgt = None
             if self.training:
                 box_noise_scale = 0.2
                 __boxes = []
@@ -909,10 +976,13 @@ class VideoModel(nn.Module):
                                          self_attn_mask = attn_mask)
         if self.training:
             if self.img_seq_idx == 0:
-                self.query_bank.append(hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries])
+                # self.query_bank.append(hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries])
+                self.query_bank.append(hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries].clone().detach())
             else:
-                ori_queries = hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries]
-                self.query_bank.append(ori_queries.clone())
+                # ori_queries = hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries]
+                # self.query_bank.append(ori_queries.clone())
+                ori_queries = hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries].clone()
+                self.query_bank.append(ori_queries.detach())
                 device = tgt.device
                 q_bank = torch.cat(self.query_bank, dim=1)
                 q_len = ori_queries.shape[1]
@@ -920,12 +990,164 @@ class VideoModel(nn.Module):
                 kv_idx = (torch.arange(q_bank.shape[1], device=device) % q_len).unsqueeze(0)  # (1,kv)
                 kv_len = q_bank.size(1)       
                 bias = torch.where(q_idx == kv_idx, False, True)
-                bias = bias.expand(1, self.tracking_query_cross_attn.num_heads, q_len, kv_len).contiguous()
-                revised_queries = self.tracking_query_cross_attn(q=ori_queries, k=q_bank, v=q_bank, attn_bias=bias)
-                
+                # bias = bias.expand(1, self.tracking_query_cross_attn.num_heads, q_len, kv_len).contiguous()
 
+                if self.memory_update_type == "sim":
+                    B, L, C = ori_queries.shape
+                    _, S, _ = q_bank.shape
+                    mk = q_bank.permute(0, 2, 1).contiguous()
+                    qk = ori_queries.permute(0, 2, 1).contiguous()
+                    qe = None
+                    ms = torch.ones(B, 1, S, device=device, dtype=tgt.dtype)
+                    # T = len(valid_counts)
+                    # decay_rate = 0.9
+
+                    # kv_time_idx = torch.arange(kv_len, device=device) // q_len  # 0..T-1
+                    # time_decay = decay_rate ** (T - 1 - kv_time_idx)            
+
+                    # ms = time_decay.view(B, 1, S).to(dtype=tgt.dtype, device=device) 
+                    # slot_mask = bias[:, 0].any(dim=1)   # (B,S)  True=mask
+                    # ms[:, slot_mask] = 0.0
+                    sim = get_similarity(mk=mk, ms=ms, qk=qk, qe=qe, add_batch_dim=False)
+                    sim = sim.transpose(1, 2)  # (B, L, N)
+                    sim = sim.masked_fill(bias[None], float('-inf'))
+
+                    affinity = torch.softmax(sim/10, dim=-1) 
+
+                    V = q_bank   # (1, S, C)
+                    out = torch.einsum('bln,bnc->blc', affinity, V)
+
+                    hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries] = out
+                    # hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries] = self.tracking_query_cross_attn(q=ori_queries, k=q_bank, v=q_bank, attn_bias=bias)
+                    # cos_sim = F.cosine_similarity(ori_queries[0][:, None],   q_bank,   dim=-1 )  # [2,
+                else:
+                    bias = bias.expand(1, self.tracking_query_cross_attn.num_heads, q_len, kv_len).contiguous()
+                    hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries] = ori_queries + self.tracking_query_cross_attn(q=ori_queries, k=q_bank, v=q_bank, attn_bias=bias)
         else:
-            print("NEED TO IMPLEMENT")
+            if hasattr(self, 'tracker') and len(self.tracker.tracks) != 0 and pr_tgt is not None:
+                frame_buckets = defaultdict(list)
+                pr_pad = pr_tgt.shape[1]
+                query_bank = [v['prev_query_list'] for k, v in self.tracker.tracks.items() if v['age'] == 0]
+                # ori_queries = hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries]
+                ori_queries = hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries].clone()
+                device = tgt.device
+                # query_bank = [torch.cat(sublist, dim=0)[None] for sublist in query_bank]
+
+                for k, v in self.tracker.tracks.items():
+                    if v['age'] != 0:
+                        continue
+                    # print(k)
+                    for t, q in enumerate(v['prev_query_list']):
+                        if q is None:
+                            continue
+                        if isinstance(q, (list, tuple)):
+                            q = torch.cat(q, dim=0)  # (n_ti, 768)
+                        frame_buckets[t].append(q)   # (n_ti, 768)
+
+                ori_len = len(frame_buckets)
+                # for k, v in self.tracker.tracks.items():
+                #     if v['age'] < self.tracker.max_age:
+                #         # frame_buckets[ori_len].append(ori_queries[0][k])
+                #         frame_buckets[ori_len].append(ori_queries[0, k].clone())
+                
+                q_n = 0
+                for k, v in self.tracker.tracks.items():
+                    if v['age'] == 0:
+                        # print(k, q_n)
+                        frame_buckets[ori_len].append(ori_queries[0, q_n].clone())
+                        q_n += 1
+
+                ordered_ts = sorted(frame_buckets.keys())
+                frames = [torch.stack(frame_buckets[t]) for t in ordered_ts] 
+
+                device = frames[0].device
+                dtype  = frames[0].dtype
+                max_len = max(f.shape[0] for f in frames)
+                feat_dim = frames[0].shape[1]
+
+                valid_counts = []
+                padded_frames = []
+                for f in frames:
+                    n = f.shape[0]
+                    valid_counts.append(n)
+                    if n < max_len:
+                        pad = torch.zeros(max_len - n, feat_dim, device=device, dtype=dtype)
+                        f = torch.cat([f, pad], dim=0)
+                    padded_frames.append(f)  # (max_len, 768)
+
+                q_bank = torch.stack(padded_frames, dim=0)
+
+                # if self.img_seq_idx == 1:
+                #     query_bank = torch.stack(query_bank, dim=0)[:, None]
+                # else:
+                #     query_bank = torch.stack(query_bank, dim=0)
+                # q_bank = torch.cat(query_bank, dim=)
+                # q_len = ori_queries.shape[1]
+                # q_idx  = torch.arange(q_len, device=device).unsqueeze(1)          # (q,1)
+                # kv_idx = (torch.arange(q_bank.shape[1], device=device) % q_len).unsqueeze(0)  # (1,kv)
+                # kv_len = q_bank.size(1)       
+                # bias = torch.where(q_idx == kv_idx, False, True)
+
+                # valid_counts = torch.tensor(valid_counts, device=device) 
+                # kv_time_idx = torch.arange(kv_len, device=device) // q_len        # (kv,)
+                # kv_valid = kv_idx.squeeze(0) < valid_counts.to(device)[kv_time_idx]  # (kv,)
+                # bias = bias | (~kv_valid.unsqueeze(0))
+
+                q_bank = q_bank.reshape(1, -1, 768)
+                q_len = ori_queries.shape[1]
+                kv_len = q_bank.size(1)
+
+                q_idx  = torch.arange(q_len, device=device).unsqueeze(1)             # (L, 1)
+                kv_idx = (torch.arange(kv_len, device=device) % q_len).unsqueeze(0)  # (1, S)
+
+                bias = torch.where(q_idx == kv_idx, False, True)                         # (L_flat, kv)
+
+                valid_counts = torch.as_tensor(valid_counts, device=device)          # (T,)
+                kv_time_idx  = torch.arange(kv_len, device=device) // q_len          # (S,)
+                kv_valid     = (kv_idx.squeeze(0) < valid_counts[kv_time_idx])       # (S,)
+                bias = bias | (~kv_valid.unsqueeze(0))   
+
+                if self.memory_update_type == "sim":
+                    B, L, C = ori_queries.shape
+                    _, S, _ = q_bank.shape
+                    mk = q_bank.permute(0, 2, 1).contiguous()
+                    qk = ori_queries.permute(0, 2, 1).contiguous()
+                    qe = None
+
+                    # T = len(valid_counts)
+                    # decay_rate = 0.9
+
+                    # kv_time_idx = torch.arange(kv_len, device=device) // q_len  # 0..T-1
+                    # time_decay = decay_rate ** (T - 1 - kv_time_idx)            
+
+                    # ms = time_decay.view(B, 1, S).to(dtype=tgt.dtype, device=device) 
+                    ms = torch.ones(B, 1, S, device=device, dtype=tgt.dtype)
+                    # slot_mask = bias[:, 0].any(dim=1)   # (B,S)  True=mask
+                    # ms[:, slot_mask] = 0.0
+                    sim = get_similarity(mk=mk, ms=ms, qk=qk, qe=qe, add_batch_dim=False)
+                    sim = sim.transpose(1, 2)  # (B, L, N)
+                    sim = sim.masked_fill(bias[None], float('-inf'))
+
+                    affinity = torch.softmax(sim/10, dim=-1) 
+
+                    V = q_bank   # (1, S, C)
+                    out = torch.einsum('bln,bnc->blc', affinity, V)
+
+                    hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries] = out
+
+                    # if self.img_seq_idx > 18:
+                    #     import pdb; pdb.set_trace()
+
+                    # bias = bias.expand(1, self.tracking_query_cross_attn.num_heads, q_len, kv_len).contiguous()
+                    # hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries] = self.tracking_query_cross_attn(q=ori_queries, k=q_bank, v=q_bank, attn_bias=bias).clone()
+
+                    # cos_sim = F.cosine_similarity(ori_queries[0][:, None],q_bank,dim=-1)
+                    # cos_sim = F.cosine_similarity(aa[0][:, None],q_bank,dim=-1)
+                    # aa = self.tracking_query_cross_attn(q=ori_queries, k=q_bank, v=q_bank, attn_bias=bias).clone()
+                    # import pdb; pdb.set_trace()
+                else:
+                    bias = bias.expand(1, self.tracking_query_cross_attn.num_heads, q_len, kv_len).contiguous()
+                    hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries] = ori_queries + self.tracking_query_cross_attn(q=ori_queries, k=q_bank, v=q_bank, attn_bias=bias)
         
         reference_before_sigmoid = inverse_sigmoid(reference)
         outputs_coords = []
@@ -1080,6 +1302,7 @@ class VideoModel(nn.Module):
                 #     boxes = out['pred_boxes'][b] * self.input_size  # [Q,4]
                 # else:
                 boxes = out['pred_j2d_boxes'][b]
+                # boxes = out['pred_boxes'][b]  * self.input_size 
                 kp2ds = out['pred_j2ds'][b]
                 Q = boxes.size(0)
                 qidx = torch.arange(Q, device=boxes.device)
@@ -1222,7 +1445,8 @@ def build_sat_video_model(args, set_criterion=True):
         input_size=args.input_size,
         sat_cfg=args.sat_cfg,
         dn_cfg=args.dn_cfg,
-        train_pos_embed=getattr(args,'train_pos_embed',True)
+        train_pos_embed=getattr(args,'train_pos_embed',True),
+        memory_update_type=args.memory_update_type,
     )
 
 

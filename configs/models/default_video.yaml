@@ -25,8 +25,8 @@ sat_cfg:
   scale_thresh: 0.5
 
 dn_cfg:
-  use_dn: True 
-  dn_number: 10
+  use_dn: True
+  dn_number: 1
   tgt_embed_type: "params"
   # tgt_embed_type: "boxes"
   box_noise_scale: 0.4

@@ -217,7 +217,7 @@ class CrossAttention(nn.Module):
         self.wk = linear_class(dim, dim, bias=qkv_bias)
         self.wv = linear_class(dim, dim, bias=qkv_bias)
         # self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim, bias=proj_bias)
+        # self.proj = nn.Linear(dim, dim, bias=proj_bias)
         # self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, q, k, v, attn_bias) -> Tensor:
@@ -251,7 +251,7 @@ class CrossAttention(nn.Module):
         # (B, N, C)
         x = x.transpose(1, 2).reshape(B, N, C)
         # x = self.proj_drop(self.proj(x))
-        x = self.proj(x)
+        # x = self.proj(x)
         return x
 
 

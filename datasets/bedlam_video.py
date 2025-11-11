@@ -18,7 +18,7 @@ class BEDLAMVideo(BASEVideo):
         keys = list(self.sample_idx.keys())
         random.shuffle(keys)
 
-        cut = int(len(keys) * 0.2)
+        cut = int(len(keys) * 0.1)
         self.sample_idx = {k: self.sample_idx[k] for k in keys[:cut]}
 
         super(BEDLAMVideo, self).__init__(**kwargs)

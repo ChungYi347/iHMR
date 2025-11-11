@@ -359,12 +359,12 @@ class Engine():
                         if not misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, args.lr_prompt_names)],
                     "lr": args.lr,
                 },
-                # {
-                #     "params": 
-                #         [p for n, p in self.unwrapped_model.named_parameters() 
-                #         if misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, args.lr_prompt_names)],
-                #     "lr": args.lr_encoder,
-                # },
+                {
+                    "params": 
+                        [p for n, p in self.unwrapped_model.named_parameters() 
+                        if misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, args.lr_prompt_names)],
+                    "lr": args.lr_encoder,
+                },
                 {
                     "params": 
                         [p for n, p in self.unwrapped_model.named_parameters() 
@@ -517,8 +517,12 @@ class Engine():
                 elif self.model.__class__.__name__ == "VideoModel" or (hasattr(self.model, 'module') and self.model.module.__class__.__name__ == "VideoModel"):
                     loss_dicts = []
                     self.model.query_bank = []
+                    if hasattr(self.model, 'module'):
+                        self.model.module.query_bank = []
                     for img_seq_idx, (sample, target) in enumerate(zip(samples[0], targets[0])):
                         self.model.img_seq_idx = img_seq_idx
+                        if hasattr(self.model, 'module'):
+                            self.model.module.img_seq_idx = img_seq_idx
                         outputs = self.model(sample, target, sat_use_gt = sat_use_gt, detach_j3ds = self.detach_j3ds)
                         loss_dict = self.criterion(outputs, target)
                         loss_dicts.append(loss_dict)
@@ -542,9 +546,13 @@ class Engine():
 
                 loss = sum(loss_dict[k] * self.weight_dict[k] for k in loss_dict.keys())
 
-                self.accelerator.backward(loss)
+                try:
+                    self.accelerator.backward(loss)
+                except:
+                    print(loss)
+                    raise
 
-                model = self.accelerator.unwrap_model(self.model) 
+                # model = self.accelerator.unwrap_model(self.model) 
                 # unused = [(i, n, tuple(p.shape))
                 #         for i, (n, p) in enumerate(model.named_parameters())
                 #         if p.requires_grad and (p.grad is None)]
@@ -724,7 +732,18 @@ class Engine():
         # # target_folders = ['000809_mpii_test']
         # # # target_folders = ['004622_mpii_test', '015241_mpii_test']
         # # target_folders = ['009470_mpii_test']
-        target_folders = ['015241_mpii_test']
+        # 003742_mpii_test, 000814_mpii_test
+        # target_folders = ['003508_mpii_test']
+        # target_folders = ['005290_mpii_test']
+        # target_folders = ['000812_mpii_test']
+        # target_folders = ['024165_mpii_test', '015301_mpii_test', '016180_mpii_test',
+        #                     '014140_mpii_test', '022691_mpii_test',
+        #                     '002364_mpii_test']
+        target_folders = ['008827_mpii_test', '002835_mpii_test', '001486_mpii_test', '012834_mpii_test',
+                            '016236_mpii_test', '007934_mpii_test', '024159_mpii_test', '024158_mpii_test',
+                            '015860_mpii_test', '007934_mpii_test', '007793_mpii_test', '008827_mpii_test',
+                            '012834_mpii_test', '011648_mpii_test']
+        
         folder_list = [f for f in folder_list if any(target in f for target in target_folders)]
         # print(args.total_gpus)
         # folder_list = folder_list[96:]
@@ -809,7 +828,7 @@ class Engine():
         # # target_folders = ['000809_mpii_test']
         # # # target_folders = ['004622_mpii_test', '015241_mpii_test']
         # # # target_folders = ['009470_mpii_test']
-        target_folders = ['downtown_car_00']
+        target_folders = ['downtown_bar_00']
         folder_list = [f for f in folder_list if any(target in f for target in target_folders)]
         # print(args.total_gpus)
 
@@ -904,8 +923,8 @@ class Engine():
         # # target_folders = ['000809_mpii_test']
         # # # target_folders = ['004622_mpii_test', '015241_mpii_test']
         # # # target_folders = ['009470_mpii_test']
-        target_folders = ['20221019_3-8_250_highbmihand_orbit_stadium_6fps']
-        # target_folders = ['20221019_3-8_250_highbmihand_orbit_stadium_6fps/png/seq_000031']
+        # target_folders = ['20221019_3-8_250_highbmihand_orbit_stadium_6fps']
+        target_folders = ['20221019_3-8_250_highbmihand_orbit_stadium_6fps/png/seq_000004']
         folder_list = [f for f in folder_list if any(target in f for target in target_folders)]
         # print(args.total_gpus)
 
@@ -996,7 +1015,7 @@ class Engine():
 
         # target_folders = ['016236_mpii_test', '018092_mpii_test', '002214_mpii_test', '002371_mpii_test']
         # target_folders = ['004622_mpii_test', '015241_mpii_test']
-        # target_folders = ['downtown_bus_00']
+        # target_folders = ['024165_mpii_test']
         # import pdb; pdb.set_trace()
         # folder_list = [f for f in folder_list if any(target in f for target in target_folders)]
         # # print(args.total_gpus)
@@ -1071,8 +1090,7 @@ class Engine():
                         results_save_path = os.path.join(results_save_path,f'{img_folder}'),
                         distributed = self.distributed_infer,
                         accelerator = self.accelerator,
-                        args = self.args,
-                        sam2_tracker = sam2_tracker)
+                        args = self.args)
                 # self.accelerator.wait_for_everyone()
 
 

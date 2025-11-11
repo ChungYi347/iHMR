@@ -57,9 +57,9 @@ aug_cfg:
 # train_datasets_split: ['train','train','train_6fps','train','train']  # ['train','train_6fps','validation_6fps']
 # sampling_weights: [1.0, 1.0, 0.1, 1.0, 1.0]
 
-train_datasets_used: ['posetrack']      # ['agora','bedlam','bedlam']
-train_datasets_split: ['train']  # ['train','train_6fps','validation_6fps']
-sampling_weights: [0.01]
+train_datasets_used: ['posetrack','agora','bedlam','coco','3dpw']      # ['agora','bedlam','bedlam']
+train_datasets_split: ['train','train','train_6fps','train','train']  # ['train','train_6fps','validation_6fps']
+sampling_weights: [1.0, 1.0, 0.1, 1.0, 1.0]
 # train_batch_size: 6
 # train_num_workers: 8
 train_batch_size: 2

@@ -1,0 +1,33 @@
+model: default
+
+pretrain: True
+# pretrain_path: './weights/sat_hmr/sat_644_3dpw.pth'
+# pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_all_sat_pr_sam2_test/epoch_1_step_23685/pytorch_model.bin'
+pretrain_path:  '/home/cglee/SAT-HMR/outputs/ckpts/train_all_sat_pr_sam2/last_epoch/pytorch_model.bin'
+
+input_dir: './data/datasets/3dpw/Dyna3DPW'
+output_dir: './tracking_results/Dyna3DPW'
+
+eval_datasets_used: ['3dpw']
+eval_datasets_split: ['test']
+eval_vis_num: 20
+conf_thresh: [0.1]
+eval_batch_size: 1
+eval_num_workers: 3
+distributed_eval: True
+infer_batch_size: 1
+infer_num_workers: 3
+distributed_infer: True
+
+
+iou_match_thresh: 0.2
+iou_new_thresh: 0.1
+is_add_new: False
+is_size_filter: False
+nms_threshold: 1.0
+pr_conf_thresh: 0.2
+max_age: 3000
+video_model: True
+video_stride: 8
+
+total_gpus: 1
