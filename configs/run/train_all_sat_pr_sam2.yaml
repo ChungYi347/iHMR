@@ -41,8 +41,8 @@ set_cost_giou: 1
 set_cost_kpts: 20
 
 video_stride: 8
-# memory_update_type: 'sim'
-memory_update_type: 'cross'
+memory_update_type: 'sim'
+# memory_update_type: 'cross'
 # train aug
 aug_cfg:
   rot_range: [-15, 15]
