@@ -321,7 +321,7 @@ def is_cut(prev_img, curr_img, thresh_phash=18, thresh_chi2=0.03):
     return chi2 > thresh_chi2
 
 def eval_posetrack(model, infer_dataloader, conf_thresh, results_save_path = None,
-                        distributed = False, accelerator = None, args=None):
+                        distributed = False, accelerator = None, args=None, init_bboxes=None):
     assert results_save_path is not None
     assert accelerator is not None
 
@@ -342,8 +342,8 @@ def eval_posetrack(model, infer_dataloader, conf_thresh, results_save_path = Non
     with open(save_path, "w", newline="") as f:
         writer = csv.writer(f)
 
-    shot_detector = ContentDetector(threshold=50.0, min_scene_len=3)
-    frame_count = 0
+    # shot_detector = ContentDetector(threshold=50.0, min_scene_len=3)
+    # frame_count = 0
     
     model.query_bank = []
     if hasattr(model, 'module'):
@@ -363,68 +363,7 @@ def eval_posetrack(model, infer_dataloader, conf_thresh, results_save_path = Non
 
         if hasattr(model, 'module'):
             model.img_seq_idx = itr
-        if model.__class__.__name__ == "PHMR":
-            inputs = []
-            
-            for target in targets:
-                img = tensor_to_BGR(unNormalize(samples[0].cpu()))[:,:,::-1]
-                
-                # detection = yolo(target['img_path'], verbose=False, conf=detect_conf, classes=0)
-                # boxes = detection[0].boxes.data.cpu()
-                detected = detector(img)
-                boxes = detected[0][detected[2] == 0]
-                # boxes = detected[0][detected[2] == 0] / model_cfg['MODEL']['IMAGE_SIZE']
-
-                # _img = cv2.imread(targets[0]['img_path'])[:,:,::-1]
-                # ori_img_szie = _img.shape
-
-                # boxes[:, 0] = boxes[:, 0] / ori_img_szie[0] * img.shape[0]
-                # boxes[:, 1] = boxes[:, 1] / ori_img_szie[1] * img.shape[1]
-                # boxes[:, 2] = boxes[:, 3] / ori_img_szie[0] * img.shape[0]
-                # boxes[:, 3] = boxes[:, 3] / ori_img_szie[1] * img.shape[1]
-                img_name = target['img_path'].split('/')[-1].split('.')[0]
-                # img_size = img.shape
-                # ori_img = img
-                # ori_img[img_size[0]:,:,:] = 255
-                # ori_img[:,img_size[1]:,:] = 255
-                # ori_img[img_size[0]:,img_size[1]:,:] = 255
-                # ori_img = pad_img(ori_img, max(img_size), pad_color_offset=255)
-                # pred_box_img = vis_boxes(ori_img.copy(), boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
-                img = np.ascontiguousarray(img)
-                # for box in boxes.numpy():
-                for box in boxes:
-                    box = box.astype(np.int32)
-                    x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
-                    cv2.rectangle(img, (x1, y1), (x2, y2), (255,0,255), 3)
-
-                cv2.imwrite(os.path.join(results_save_path, f'{img_name}.png'), img)
-
-                boxes = torch.tensor(boxes)
-
-                _input = {'image_cv': img, 'boxes': boxes, 'text': None, 'masks': None}
-                inputs.append(_input)
-            # inputs = [{'image_cv': img, 'boxes': boxes, 'text': None, 'masks': None}]
-
-            batch = prepare_batch(inputs, img_size=896, interaction=False)
-
-            # samples=[sample.to(device = cur_device, non_blocking = True) for sample in samples]
-            with torch.no_grad():    
-                # outputs = model(samples, targets)
-                outputs = model(batch, targets)
-        elif model.__class__.__name__ == "Sam2Model":
-            mean = torch.tensor([123.675, 116.28, 103.53]).view(3, 1, 1).to(samples[0].device)
-            std = torch.tensor([58.395, 57.12, 57.375]).view(3, 1, 1).to(samples[0].device)
-            img = samples[0] * std + mean
-            img = torch.clamp(img, 0, 255).to(torch.uint8)
-    
-            detected = detector(img.cpu().numpy().transpose(1,2,0))
-            boxes = detected[0][detected[2] == 0]
-            targets[0]['boxes'] = box_xyxy_to_cxcywh(torch.tensor(boxes)) / model.input_size 
-            targets[0]['cam_intrinsics'] = model.cam_intrinsics[None]
-
-            with torch.no_grad():    
-                outputs = model(samples, targets)
-        elif model.__class__.__name__ == "ImageModel":
+        if model.__class__.__name__ == "ImageModel":
             # if itr == 0:
             #     img = tensor_to_BGR(unNormalize(samples[0].cpu()))[:,:,::-1]
             #     detected = detector(img)
@@ -447,6 +386,9 @@ def eval_posetrack(model, infer_dataloader, conf_thresh, results_save_path = Non
             #     model.tracker.reset()
             #     print(model.tracker.next_id)
             #     print(targets[0]['img_path'], shots)
+
+            if hasattr(args, 'is_trkquery') and not args.is_trkquery:
+                targets[0]['is_trkquery'] = args.is_trkquery
             
             samples=[sample.to(device = cur_device, non_blocking = True) for sample in samples]
             with torch.no_grad():    
@@ -456,9 +398,76 @@ def eval_posetrack(model, infer_dataloader, conf_thresh, results_save_path = Non
             elapsed = end_time - start_time
             times.append(elapsed)
         else:
-            samples=[sample.to(device = cur_device, non_blocking = True) for sample in samples]
+            samples=[sample.to(device = cur_device, non_blocking = True) for sample in samples] 
+            if hasattr(args, 'is_trkquery') and not args.is_trkquery:
+                targets[0]['is_trkquery'] = args.is_trkquery
+            targets[0]['is_gt'] = hasattr(args, 'is_gt') and args.is_gt
+            if init_bboxes is not None:
+                boxes_for_itr = torch.tensor([box for fidx, _, box in init_bboxes if fidx == itr])
+                if len(boxes_for_itr) != 0:
+                    ori_img_w, ori_img_h = targets[0]['ori_img_size'][1], targets[0]['ori_img_size'][0]
+                    img_w, img_h = targets[0]['img_size'][1], targets[0]['img_size'][0]
+
+                    boxes_for_itr[:, 2] = boxes_for_itr[:, 2] + boxes_for_itr[:, 0]
+                    boxes_for_itr[:, 3] = boxes_for_itr[:, 3] + boxes_for_itr[:, 1]
+                    boxes_for_itr = boxes_for_itr / torch.tensor([ori_img_w, ori_img_h, ori_img_w, ori_img_h]) * torch.tensor([img_w, img_h, img_w, img_h])
+
+                    _boxes_for_itr = boxes_for_itr.clone()
+
+                    # _boxes_for_itr[:, 0] = boxes_for_itr[:, 1]
+                    # _boxes_for_itr[:, 1] = boxes_for_itr[:, 0]
+                    # _boxes_for_itr[:, 2] = boxes_for_itr[:, 3]
+                    # _boxes_for_itr[:, 3] = boxes_for_itr[:, 2]
+
+                    # boxes_for_itr[:, 0] = (_boxes_for_itr[:, 0] + _boxes_for_itr[:, 2]) / 2  # cx
+                    # boxes_for_itr[:, 1] = (_boxes_for_itr[:, 1] + _boxes_for_itr[:, 3]) / 2  # cy
+                    # boxes_for_itr[:, 2] = _boxes_for_itr[:, 2] - _boxes_for_itr[:, 0]        # w
+                    # boxes_for_itr[:, 3] = _boxes_for_itr[:, 3] - _boxes_for_itr[:, 1]        # h
+
+                    # targets[0]['init_boxes'] = boxes_for_itr[0][None]
+                    targets[0]['init_boxes'] = boxes_for_itr
+                    with torch.no_grad():    
+                        outputs = model(samples, targets)
+                    del targets[0]['init_boxes']
+
+
+                    # x, y, w, h = boxes_for_itr.unbind(-1)
+                    # # boxes_for_itr = torch.stack([
+                    # #     x - w/2,
+                    # #     y - h/2,
+                    # #     x + w/2,
+                    # #     y + h/2,
+                    # # ], dim=-1)
+
+                    # # img_size = targets[0]['img_size'].detach().cpu().int().numpy()
+                    # img_size = targets[0]['ori_img_size'].detach().cpu().int().numpy()
+                    # # ori_img = tensor_to_BGR(unNormalize(samples[0]).cpu())
+                    # ori_img = cv2.imread(targets[0]['img_path'])
+                    # ori_img[img_size[0]:,:,:] = 255
+                    # ori_img[:,img_size[1]:,:] = 255
+                    # ori_img[img_size[0]:,img_size[1]:,:] = 255
+
+                    # pred_mesh_img = vis_boxes(ori_img, boxes_for_itr, color = (255,0,255))[:img_size[0],:img_size[1]]
+                    # for box_idx, box in enumerate(boxes_for_itr):
+                    #     x1, y1, x2, y2 = box.int().tolist()
+                    #     cv2.putText(
+                    #         pred_mesh_img,
+                    #         f"{box_idx}",
+                    #         (x1, y1 - 5),
+                    #         cv2.FONT_HERSHEY_SIMPLEX,
+                    #         0.8,
+                    #         (255, 0, 255),
+                    #         2,
+                    #         cv2.LINE_AA
+                    #     )
+                    # cv2.imwrite(os.path.join(f'bbox.png'), pred_mesh_img)
+                    # import pdb; pdb.set_trace()
             with torch.no_grad():    
+                start_time = time.time()
                 outputs = model(samples, targets)
+                end_time = time.time()
+            elapsed = end_time - start_time
+            times.append(elapsed)
 
             # prev_frame = cur_frame
 
@@ -467,150 +476,154 @@ def eval_posetrack(model, infer_dataloader, conf_thresh, results_save_path = Non
             img_size = targets[idx]['img_size'].detach().cpu().int().numpy()
             img_name = targets[idx]['img_path'].split('/')[-1].split('.')[0]
 
-            # # # #pred
-            if model.__class__.__name__ == "PHMR":
-                pred_verts = outputs[idx]['vertices'].detach().cpu().numpy()
-            elif model.__class__.__name__ == "Sam2Model":
-                pred_verts = outputs['pred_verts'][idx].detach().cpu().numpy()
-            elif model.__class__.__name__ == "VideoModel":
-                pred_verts = outputs['pred_verts'].detach().cpu().numpy()
-            else:
-                # select_queries_idx = torch.where(outputs['pred_confs'][idx] > model.tracker.conf_thresh)[0]
-                # pred_verts = outputs['pred_verts'][idx][select_queries_idx].detach().cpu().numpy()
-                pred_verts = outputs['pred_verts'][idx].detach().cpu().numpy()
+            # # # # #pred
+            # if model.__class__.__name__ == "PHMR":
+            #     pred_verts = outputs[idx]['vertices'].detach().cpu().numpy()
+            # elif model.__class__.__name__ == "Sam2Model":
+            #     pred_verts = outputs['pred_verts'][idx].detach().cpu().numpy()
+            # elif model.__class__.__name__ == "VideoModel":
+            #     pred_verts = outputs['pred_verts'].detach().cpu().numpy()
+            # else:
+            #     # select_queries_idx = torch.where(outputs['pred_confs'][idx] > model.tracker.conf_thresh)[0]
+            #     # pred_verts = outputs['pred_verts'][idx][select_queries_idx].detach().cpu().numpy()
+            #     pred_verts = outputs['pred_verts'][idx].detach().cpu().numpy()
             
-            ori_img = tensor_to_BGR(unNormalize(samples[idx]).cpu())
-            ori_img[img_size[0]:,:,:] = 255
-            ori_img[:,img_size[1]:,:] = 255
-            ori_img[img_size[0]:,img_size[1]:,:] = 255
+            # ori_img = tensor_to_BGR(unNormalize(samples[idx]).cpu())
+            # ori_img[img_size[0]:,:,:] = 255
+            # ori_img[:,img_size[1]:,:] = 255
+            # ori_img[img_size[0]:,img_size[1]:,:] = 255
 
-            if model.__class__.__name__ == "PHMR":
-                ori_img = pad_img(ori_img, max(img_size), pad_color_offset=255)
-                colors = get_colors_rgb(len(pred_verts))
-                # pred_verts = smplx_out.vertices
-                # smpl_layer = smpl
-                pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
-                                            verts = pred_verts,
-                                            smpl_faces = smpl_layer.faces,
-                                            cam_intrinsics = batch[idx]['cam_int_original'][0].reshape(3,3).detach().cpu(),
-                                            colors=colors)[:img_size[0],:img_size[1]]
-                cv2.imwrite(os.path.join(results_save_path, f'tt_{img_name}.png'), pred_mesh_img)
-            elif model.__class__.__name__ == "Sam2Model":
-                ori_img = pad_img(ori_img, max(img_size), pad_color_offset=255)
-                colors = get_colors_rgb(len(pred_verts))
-                # pred_verts = smplx_out.vertices
-                # smpl_layer = smpl
-                pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
-                                            verts = pred_verts,
-                                            smpl_faces = smpl_layer.faces,
-                                            cam_intrinsics = outputs['pred_intrinsics'][idx].reshape(3,3).detach().cpu(),
-                                            colors=colors)[:img_size[0],:img_size[1]]
-                cv2.imwrite(os.path.join(results_save_path, f'sam2_{img_name}.png'), pred_mesh_img)
-            else:
-                ori_img = pad_img(ori_img, model.input_size, pad_color_offset=255)
-                # sat_img = vis_sat(ori_img.copy(),
-                #                     input_size = model.input_size,
-                #                     patch_size = 14,
-                #                     sat_dict = outputs['sat'],
-                #                     bid = idx)[:img_size[0],:img_size[1]]
+            # if model.__class__.__name__ == "PHMR":
+            #     ori_img = pad_img(ori_img, max(img_size), pad_color_offset=255)
+            #     colors = get_colors_rgb(len(pred_verts))
+            #     # pred_verts = smplx_out.vertices
+            #     # smpl_layer = smpl
+            #     pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
+            #                                 verts = pred_verts,
+            #                                 smpl_faces = smpl_layer.faces,
+            #                                 cam_intrinsics = batch[idx]['cam_int_original'][0].reshape(3,3).detach().cpu(),
+            #                                 colors=colors)[:img_size[0],:img_size[1]]
+            #     cv2.imwrite(os.path.join(results_save_path, f'tt_{img_name}.png'), pred_mesh_img)
+            # elif model.__class__.__name__ == "Sam2Model":
+            #     ori_img = pad_img(ori_img, max(img_size), pad_color_offset=255)
+            #     colors = get_colors_rgb(len(pred_verts))
+            #     # pred_verts = smplx_out.vertices
+            #     # smpl_layer = smpl
+            #     pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
+            #                                 verts = pred_verts,
+            #                                 smpl_faces = smpl_layer.faces,
+            #                                 cam_intrinsics = outputs['pred_intrinsics'][idx].reshape(3,3).detach().cpu(),
+            #                                 colors=colors)[:img_size[0],:img_size[1]]
+            #     cv2.imwrite(os.path.join(results_save_path, f'sam2_{img_name}.png'), pred_mesh_img)
+            # else:
+            #     ori_img = pad_img(ori_img, model.input_size, pad_color_offset=255)
+            #     # sat_img = vis_sat(ori_img.copy(),
+            #     #                     input_size = model.input_size,
+            #     #                     patch_size = 14,
+            #     #                     sat_dict = outputs['sat'],
+            #     #                     bid = idx)[:img_size[0],:img_size[1]]
 
-                if model.__class__.__name__ == "VideoModel":
-                    colors = get_colors_rgb_tracking_ids(outputs['track_ids'][0])
-                else:
-                    colors = get_colors_rgb(len(pred_verts))
-                colors = get_colors_rgb_tracking_ids(outputs['track_ids'][0])
+            #     if model.__class__.__name__ == "VideoModel":
+            #         colors = get_colors_rgb_tracking_ids(outputs['track_ids'][0])
+            #     else:
+            #         colors = get_colors_rgb(len(pred_verts))
+            #     colors = get_colors_rgb_tracking_ids(outputs['track_ids'][0])
+            #     # colors = get_colors_rgb(len(pred_verts[0][:15]))
                 
 
 
-                color_ref = init_color_ref(2000)
-                colors = color_ref[outputs['track_ids'][0]]
-                # colors = get_colors_rgb(len(pred_verts))
-                pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
-                                            verts = pred_verts[idx],
-                                            # verts = pred_verts,
-                                            smpl_faces = smpl_layer.faces,
-                                            cam_intrinsics = outputs['pred_intrinsics'][idx].reshape(3,3).detach().cpu(),
-                                            colors=colors)[:img_size[0],:img_size[1]]
+            #     color_ref = init_color_ref(2000)
+            #     colors = color_ref[outputs['track_ids'][0]]
+            #     # colors = get_colors_rgb(len(pred_verts))
+            #     pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
+            #                                 # verts = pred_verts[idx][:15],
+            #                                 verts = pred_verts[idx],
+            #                                 # verts = pred_verts,
+            #                                 smpl_faces = smpl_layer.faces,
+            #                                 cam_intrinsics = outputs['pred_intrinsics'][idx].reshape(3,3).detach().cpu(),
+            #                                 colors=colors)[:img_size[0],:img_size[1]]
                     
-                # if 'enc_outputs' not in outputs:
-                #     pred_scale_img = np.zeros_like(ori_img)[:img_size[0],:img_size[1]]
-                # else:
-                #     enc_out = outputs['enc_outputs']
-                #     h, w = enc_out['hw'][idx]
-                #     flatten_map = enc_out['scale_map'].split(enc_out['lens'])[idx].detach().cpu()
+            #     # if 'enc_outputs' not in outputs:
+            #     #     pred_scale_img = np.zeros_like(ori_img)[:img_size[0],:img_size[1]]
+            #     # else:
+            #     #     enc_out = outputs['enc_outputs']
+            #     #     h, w = enc_out['hw'][idx]
+            #     #     flatten_map = enc_out['scale_map'].split(enc_out['lens'])[idx].detach().cpu()
 
-                #     ys = enc_out['pos_y'].split(enc_out['lens'])[idx]
-                #     xs = enc_out['pos_x'].split(enc_out['lens'])[idx]
-                #     scale_map = torch.zeros((h,w,2))
-                #     scale_map[ys,xs] = flatten_map
+            #     #     ys = enc_out['pos_y'].split(enc_out['lens'])[idx]
+            #     #     xs = enc_out['pos_x'].split(enc_out['lens'])[idx]
+            #     #     scale_map = torch.zeros((h,w,2))
+            #     #     scale_map[ys,xs] = flatten_map
 
-                #     pred_scale_img = vis_scale_img(img = ori_img.copy(),
-                #                                     scale_map = scale_map,
-                #                                     conf_thresh = model.sat_cfg['conf_thresh'],
-                #                                     patch_size=28)[:img_size[0],:img_size[1]]
+            #     #     pred_scale_img = vis_scale_img(img = ori_img.copy(),
+            #     #                                     scale_map = scale_map,
+            #     #                                     conf_thresh = model.sat_cfg['conf_thresh'],
+            #     #                                     patch_size=28)[:img_size[0],:img_size[1]]
 
-                # pred_boxes = outputs['pred_boxes'][idx][select_queries_idx].detach().cpu()
-                # pred_boxes = box_cxcywh_to_xyxy(pred_boxes) * model.input_size
-                # pred_box_img = vis_boxes(ori_img.copy(), pred_boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
+            #     # pred_boxes = outputs['pred_boxes'][idx][select_queries_idx].detach().cpu()
+            #     # pred_boxes = box_cxcywh_to_xyxy(pred_boxes) * model.input_size
+            #     # pred_box_img = vis_boxes(ori_img.copy(), pred_boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
 
-                # cv2.imwrite(os.path.join(results_save_path, f'{img_name}.png'), np.vstack([np.hstack([pred_box_img, pred_mesh_img]),
-                #                                                                             np.hstack([pred_scale_img, sat_img])]))
+            #     # cv2.imwrite(os.path.join(results_save_path, f'{img_name}.png'), np.vstack([np.hstack([pred_box_img, pred_mesh_img]),
+            #     #                                                                             np.hstack([pred_scale_img, sat_img])]))
 
-                # pred_confs = outputs['ori_pred_confs'][idx]
-                # pred_boxes = outputs['ori_pred_boxes'][idx][pred_confs[:, 0] > conf_thresh].detach().cpu() * model.input_size
-                # pred_boxes = box_cxcywh_to_xyxy(pred_boxes) 
-                # pred_boxes = outputs['pred_boxes'][idx].detach().cpu() * model.input_size
-                # pred_boxes = box_cxcywh_to_xyxy(pred_boxes)
+            #     # pred_confs = outputs['ori_pred_confs'][idx]
+            #     # pred_boxes = outputs['ori_pred_boxes'][idx][pred_confs[:, 0] > conf_thresh].detach().cpu() * model.input_size
+            #     # pred_boxes = box_cxcywh_to_xyxy(pred_boxes) 
+            #     # pred_boxes = outputs['pred_boxes'][idx].detach().cpu() * model.input_size
+            #     # pred_boxes = box_cxcywh_to_xyxy(pred_boxes)
 
-                # box_img = ori_img.copy()
-                # for box_idx, bbox in enumerate(pred_boxes):
-                #     x1, y1, x2, y2 = bbox.int().tolist()
-                #     # kfx1, kfy1, kfx2, kfy2 = model.tracker.tracks[tid]['kf'].get_xyxy().tolist()
-                #     cv2.rectangle(box_img, (x1, y1), (x2, y2), (255, 0, 255), 2)
-                #     # cv2.rectangle(pred_mesh_img, (int(kfx1), int(kfy1)), (int(kfx2), int(kfy2)), (0, 255, 0), 4)
-                #     cv2.putText(
-                #         box_img,
-                #         f"{box_idx}",
-                #         (x1, y1 - 5),
-                #         cv2.FONT_HERSHEY_SIMPLEX,
-                #         0.8,
-                #         (255, 0, 255),
-                #         2,
-                #         cv2.LINE_AA
-                #     )
-                # box_img = box_img[:img_size[0],:img_size[1]]
+            #     # box_img = ori_img.copy()
+            #     # for box_idx, bbox in enumerate(pred_boxes):
+            #     #     x1, y1, x2, y2 = bbox.int().tolist()
+            #     #     # kfx1, kfy1, kfx2, kfy2 = model.tracker.tracks[tid]['kf'].get_xyxy().tolist()
+            #     #     cv2.rectangle(box_img, (x1, y1), (x2, y2), (255, 0, 255), 2)
+            #     #     # cv2.rectangle(pred_mesh_img, (int(kfx1), int(kfy1)), (int(kfx2), int(kfy2)), (0, 255, 0), 4)
+            #     #     cv2.putText(
+            #     #         box_img,
+            #     #         f"{box_idx}",
+            #     #         (x1, y1 - 5),
+            #     #         cv2.FONT_HERSHEY_SIMPLEX,
+            #     #         0.8,
+            #     #         (255, 0, 255),
+            #     #         2,
+            #     #         cv2.LINE_AA
+            #     #     )
+            #     # box_img = box_img[:img_size[0],:img_size[1]]
 
-                # box_img = ori_img.copy()
-                # pred_boxes = outputs['pred_j2d_boxes'][idx].detach().cpu()
-                # pred_boxes = box_cxcywh_to_xyxy(pred_boxes) 
-                # _pred_boxes = outputs['pred_boxes'][idx].detach().cpu() 
-                # _pred_boxes = box_cxcywh_to_xyxy(_pred_boxes) * model.input_size
+            #     # box_img = ori_img.copy()
+            #     pred_boxes = outputs['pred_j2d_boxes'][idx].detach().cpu()
+            #     pred_boxes = box_cxcywh_to_xyxy(pred_boxes) 
+            #     # print(pred_boxes.shape)
+            #     # _pred_boxes = outputs['pred_boxes'][idx].detach().cpu() 
+            #     # _pred_boxes = box_cxcywh_to_xyxy(_pred_boxes) * model.input_size
 
-                # pred_mesh_img = vis_boxes(pred_mesh_img, pred_boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
-                # pred_mesh_img = vis_boxes(pred_mesh_img, _pred_boxes, color = (0,0,255))[:img_size[0],:img_size[1]]
-                # for box_idx, tid in enumerate(outputs['active_ids']):
-                #     x1, y1, x2, y2 = pred_boxes[box_idx].int().tolist()
-                #     # kfx1, kfy1, kfx2, kfy2 = model.tracker.tracks[tid]['kf'].get_xyxy().tolist()
-                #     cv2.rectangle(pred_mesh_img, (x1, y1), (x2, y2), (255, 0, 255), 2)
-                #     # cv2.rectangle(pred_mesh_img, (int(kfx1), int(kfy1)), (int(kfx2), int(kfy2)), (0, 255, 0), 4)
-                #     cv2.putText(
-                #         pred_mesh_img,
-                #         f"{tid}",
-                #         (x1, y1 - 5),
-                #         cv2.FONT_HERSHEY_SIMPLEX,
-                #         0.8,
-                #         (255, 0, 255),
-                #         2,
-                #         cv2.LINE_AA
-                #     )
-                # pred_mesh_img = vis_boxes(pred_mesh_img, pred_boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
+            #     # pred_mesh_img = vis_boxes(pred_mesh_img, pred_boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
+            #     # pred_mesh_img = vis_boxes(pred_mesh_img, _pred_boxes, color = (0,0,255))[:img_size[0],:img_size[1]]
+            #     for box_idx, tid in enumerate(outputs['active_ids']):
+            #     # for box_idx, tid in enumerate(range(len(pred_verts[0][:15]))):
+            #         x1, y1, x2, y2 = pred_boxes[box_idx].int().tolist()
+            #         # kfx1, kfy1, kfx2, kfy2 = model.tracker.tracks[tid]['kf'].get_xyxy().tolist()
+            #         cv2.rectangle(pred_mesh_img, (x1, y1), (x2, y2), (255, 0, 255), 2)
+            #         # cv2.rectangle(pred_mesh_img, (int(kfx1), int(kfy1)), (int(kfx2), int(kfy2)), (0, 255, 0), 4)
+            #         cv2.putText(
+            #             pred_mesh_img,
+            #             f"{tid}",
+            #             (x1, y1 - 5),
+            #             cv2.FONT_HERSHEY_SIMPLEX,
+            #             0.8,
+            #             (255, 0, 255),
+            #             2,
+            #             cv2.LINE_AA
+            #         )
+            #     # pred_mesh_img = vis_boxes(pred_mesh_img, pred_boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
 
-                # # select_queries_idx = torch.where(outputs['pred_confs'][idx] > conf_thresh)[0]
-                # # ori_pred_boxes = outputs['ori_pred_boxes'][idx][select_queries_idx]
-                # # ori_pred_boxes = box_cxcywh_to_xyxy(ori_pred_boxes) * model.input_size
-                # # pred_mesh_img = vis_boxes(pred_mesh_img, ori_pred_boxes, color = (0,255,0))[:img_size[0],:img_size[1]]
-                cv2.imwrite(os.path.join(results_save_path, f'{img_name}.png'), pred_mesh_img)
-                # cv2.imwrite(os.path.join(results_save_path, f'{img_name}.png'), box_img)
+            #     # # select_queries_idx = torch.where(outputs['pred_confs'][idx] > conf_thresh)[0]
+            #     # # ori_pred_boxes = outputs['ori_pred_boxes'][idx][select_queries_idx]
+            #     # # ori_pred_boxes = box_cxcywh_to_xyxy(ori_pred_boxes) * model.input_size
+            #     # # pred_mesh_img = vis_boxes(pred_mesh_img, ori_pred_boxes, color = (0,255,0))[:img_size[0],:img_size[1]]
+            #     cv2.imwrite(os.path.join(results_save_path, f'{img_name}.png'), pred_mesh_img)
+            #     # cv2.imwrite(os.path.join(results_save_path, f'{img_name}.png'), box_img)
                 
 
             # print(len(outputs['pred_verts'][0]))
@@ -1168,6 +1181,8 @@ def eval_bedlam_track(model, infer_dataloader, conf_thresh, results_save_path = 
     model.query_bank = []
     if hasattr(model, 'module'):
         model.module.query_bank = []
+
+    times = []
         
     detect_conf = 0.3
     for itr, (samples, targets) in enumerate(infer_dataloader):
@@ -1175,142 +1190,145 @@ def eval_bedlam_track(model, infer_dataloader, conf_thresh, results_save_path = 
         model.img_seq_idx = itr
         samples=[sample.to(device = cur_device, non_blocking = True) for sample in samples]
         with torch.no_grad():    
+            start_time = time.time()
             outputs = model(samples, targets)
+            end_time = time.time()
+        elapsed = end_time - start_time
+        times.append(elapsed)
 
         bs = len(targets)
         for idx in range(bs):
             img_size = targets[idx]['img_size'].detach().cpu().int().numpy()
             img_name = targets[idx]['img_path'].split('/')[-1].split('.')[0]
 
-            if itr > -1:
-                # # # #pred
-                if model.__class__.__name__ == "PHMR":
-                    pred_verts = outputs[idx]['vertices'].detach().cpu().numpy()
-                elif model.__class__.__name__ == "Sam2Model":
-                    pred_verts = outputs['pred_verts'][idx].detach().cpu().numpy()
-                elif model.__class__.__name__ == "VideoModel":
-                    pred_verts = outputs['pred_verts'].detach().cpu().numpy()
-                else:
-                    select_queries_idx = torch.where(outputs['pred_confs'][idx] > conf_thresh)[0]
-                    pred_verts = outputs['pred_verts'][idx][select_queries_idx].detach().cpu().numpy()
+            # if itr > -1:
+            #     # # # #pred
+            #     if model.__class__.__name__ == "PHMR":
+            #         pred_verts = outputs[idx]['vertices'].detach().cpu().numpy()
+            #     elif model.__class__.__name__ == "Sam2Model":
+            #         pred_verts = outputs['pred_verts'][idx].detach().cpu().numpy()
+            #     elif model.__class__.__name__ == "VideoModel":
+            #         pred_verts = outputs['pred_verts'].detach().cpu().numpy()
+            #     else:
+            #         select_queries_idx = torch.where(outputs['pred_confs'][idx] > conf_thresh)[0]
+            #         pred_verts = outputs['pred_verts'][idx][select_queries_idx].detach().cpu().numpy()
                 
-                ori_img = tensor_to_BGR(unNormalize(samples[idx]).cpu())
-                ori_img[img_size[0]:,:,:] = 255
-                ori_img[:,img_size[1]:,:] = 255
-                ori_img[img_size[0]:,img_size[1]:,:] = 255
+            #     ori_img = tensor_to_BGR(unNormalize(samples[idx]).cpu())
+            #     ori_img[img_size[0]:,:,:] = 255
+            #     ori_img[:,img_size[1]:,:] = 255
+            #     ori_img[img_size[0]:,img_size[1]:,:] = 255
 
-                if model.__class__.__name__ == "PHMR":
-                    ori_img = pad_img(ori_img, max(img_size), pad_color_offset=255)
-                    colors = get_colors_rgb(len(pred_verts))
-                    # pred_verts = smplx_out.vertices
-                    # smpl_layer = smpl
-                    pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
-                                                verts = pred_verts,
-                                                smpl_faces = smpl_layer.faces,
-                                                cam_intrinsics = batch[idx]['cam_int_original'][0].reshape(3,3).detach().cpu(),
-                                                colors=colors)[:img_size[0],:img_size[1]]
-                    cv2.imwrite(os.path.join(results_save_path, f'tt_{img_name}.png'), pred_mesh_img)
-                elif model.__class__.__name__ == "Sam2Model":
-                    ori_img = pad_img(ori_img, max(img_size), pad_color_offset=255)
-                    colors = get_colors_rgb(len(pred_verts))
-                    # pred_verts = smplx_out.vertices
-                    # smpl_layer = smpl
-                    pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
-                                                verts = pred_verts,
-                                                smpl_faces = smpl_layer.faces,
-                                                cam_intrinsics = outputs['pred_intrinsics'][idx].reshape(3,3).detach().cpu(),
-                                                colors=colors)[:img_size[0],:img_size[1]]
-                    cv2.imwrite(os.path.join(results_save_path, f'sam2_{img_name}.png'), pred_mesh_img)
-                else:
-                    ori_img = pad_img(ori_img, model.input_size, pad_color_offset=255)
-                    # sat_img = vis_sat(ori_img.copy(),
-                    #                     input_size = model.input_size,
-                    #                     patch_size = 14,
-                    #                     sat_dict = outputs['sat'],
-                    #                     bid = idx)[:img_size[0],:img_size[1]]
+            #     if model.__class__.__name__ == "PHMR":
+            #         ori_img = pad_img(ori_img, max(img_size), pad_color_offset=255)
+            #         colors = get_colors_rgb(len(pred_verts))
+            #         # pred_verts = smplx_out.vertices
+            #         # smpl_layer = smpl
+            #         pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
+            #                                     verts = pred_verts,
+            #                                     smpl_faces = smpl_layer.faces,
+            #                                     cam_intrinsics = batch[idx]['cam_int_original'][0].reshape(3,3).detach().cpu(),
+            #                                     colors=colors)[:img_size[0],:img_size[1]]
+            #         cv2.imwrite(os.path.join(results_save_path, f'tt_{img_name}.png'), pred_mesh_img)
+            #     elif model.__class__.__name__ == "Sam2Model":
+            #         ori_img = pad_img(ori_img, max(img_size), pad_color_offset=255)
+            #         colors = get_colors_rgb(len(pred_verts))
+            #         # pred_verts = smplx_out.vertices
+            #         # smpl_layer = smpl
+            #         pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
+            #                                     verts = pred_verts,
+            #                                     smpl_faces = smpl_layer.faces,
+            #                                     cam_intrinsics = outputs['pred_intrinsics'][idx].reshape(3,3).detach().cpu(),
+            #                                     colors=colors)[:img_size[0],:img_size[1]]
+            #         cv2.imwrite(os.path.join(results_save_path, f'sam2_{img_name}.png'), pred_mesh_img)
+            #     else:
+            #         ori_img = pad_img(ori_img, model.input_size, pad_color_offset=255)
+            #         # sat_img = vis_sat(ori_img.copy(),
+            #         #                     input_size = model.input_size,
+            #         #                     patch_size = 14,
+            #         #                     sat_dict = outputs['sat'],
+            #         #                     bid = idx)[:img_size[0],:img_size[1]]
 
-                    if model.__class__.__name__ == "VideoModel":
-                        colors = get_colors_rgb_tracking_ids(outputs['track_ids'][0])
-                    else:
-                        colors = get_colors_rgb(len(pred_verts))
-                    # colors = get_colors_rgb_tracking_ids(outputs['track_ids'][0])
-                    color_ref = init_color_ref(2000)
-                    colors = color_ref[outputs['track_ids'][0]]
-                    # h, w, _ = ori_img.shape
-                    # ori_img = np.zeros((h, w, 3), dtype=np.uint8)  # RGBA
-                    # colors = get_colors_rgb(len(pred_verts))
-                    pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
-                                                verts = pred_verts[idx],
-                                                # verts = pred_verts,
-                                                smpl_faces = smpl_layer.faces,
-                                                cam_intrinsics = outputs['pred_intrinsics'][idx].reshape(3,3).detach().cpu(),
-                                                colors=colors)[:img_size[0],:img_size[1]]
+            #         if model.__class__.__name__ == "VideoModel":
+            #             colors = get_colors_rgb_tracking_ids(outputs['track_ids'][0])
+            #         else:
+            #             colors = get_colors_rgb(len(pred_verts))
+            #         # colors = get_colors_rgb_tracking_ids(outputs['track_ids'][0])
+            #         color_ref = init_color_ref(2000)
+            #         colors = color_ref[outputs['track_ids'][0]]
+            #         # h, w, _ = ori_img.shape
+            #         # ori_img = np.zeros((h, w, 3), dtype=np.uint8)  # RGBA
+            #         # colors = get_colors_rgb(len(pred_verts))
+            #         pred_mesh_img = vis_meshes_img(img = ori_img.copy(),
+            #                                     verts = pred_verts[idx],
+            #                                     # verts = pred_verts,
+            #                                     smpl_faces = smpl_layer.faces,
+            #                                     cam_intrinsics = outputs['pred_intrinsics'][idx].reshape(3,3).detach().cpu(),
+            #                                     colors=colors)[:img_size[0],:img_size[1]]
                         
-                    # if 'enc_outputs' not in outputs:
-                    #     pred_scale_img = np.zeros_like(ori_img)[:img_size[0],:img_size[1]]
-                    # else:
-                    #     enc_out = outputs['enc_outputs']
-                    #     h, w = enc_out['hw'][idx]
-                    #     flatten_map = enc_out['scale_map'].split(enc_out['lens'])[idx].detach().cpu()
+            #         # if 'enc_outputs' not in outputs:
+            #         #     pred_scale_img = np.zeros_like(ori_img)[:img_size[0],:img_size[1]]
+            #         # else:
+            #         #     enc_out = outputs['enc_outputs']
+            #         #     h, w = enc_out['hw'][idx]
+            #         #     flatten_map = enc_out['scale_map'].split(enc_out['lens'])[idx].detach().cpu()
 
-                    #     ys = enc_out['pos_y'].split(enc_out['lens'])[idx]
-                    #     xs = enc_out['pos_x'].split(enc_out['lens'])[idx]
-                    #     scale_map = torch.zeros((h,w,2))
-                    #     scale_map[ys,xs] = flatten_map
+            #         #     ys = enc_out['pos_y'].split(enc_out['lens'])[idx]
+            #         #     xs = enc_out['pos_x'].split(enc_out['lens'])[idx]
+            #         #     scale_map = torch.zeros((h,w,2))
+            #         #     scale_map[ys,xs] = flatten_map
 
-                    #     pred_scale_img = vis_scale_img(img = ori_img.copy(),
-                    #                                     scale_map = scale_map,
-                    #                                     conf_thresh = model.sat_cfg['conf_thresh'],
-                    #                                     patch_size=28)[:img_size[0],:img_size[1]]
+            #         #     pred_scale_img = vis_scale_img(img = ori_img.copy(),
+            #         #                                     scale_map = scale_map,
+            #         #                                     conf_thresh = model.sat_cfg['conf_thresh'],
+            #         #                                     patch_size=28)[:img_size[0],:img_size[1]]
 
-                    # pred_boxes = outputs['pred_boxes'][idx][select_queries_idx].detach().cpu()
-                    # pred_boxes = box_cxcywh_to_xyxy(pred_boxes) * model.input_size
-                    # pred_box_img = vis_boxes(ori_img.copy(), pred_boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
+            #         # pred_boxes = outputs['pred_boxes'][idx][select_queries_idx].detach().cpu()
+            #         # pred_boxes = box_cxcywh_to_xyxy(pred_boxes) * model.input_size
+            #         # pred_box_img = vis_boxes(ori_img.copy(), pred_boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
 
-                    # cv2.imwrite(os.path.join(results_save_path, f'{img_name}.png'), np.vstack([np.hstack([pred_box_img, pred_mesh_img]),
-                    #                                                                             np.hstack([pred_scale_img, sat_img])]))
+            #         # cv2.imwrite(os.path.join(results_save_path, f'{img_name}.png'), np.vstack([np.hstack([pred_box_img, pred_mesh_img]),
+            #         #                                                                             np.hstack([pred_scale_img, sat_img])]))
 
-                    # pred_boxes = outputs['pred_j2d_boxes'][idx].detach().cpu()
-                    # pred_boxes = box_cxcywh_to_xyxy(pred_boxes) 
-                    # pred_boxes = outputs['pred_boxes'][idx].detach().cpu() * model.input_size
-                    # pred_boxes = box_cxcywh_to_xyxy(pred_boxes)
+            #         # pred_boxes = outputs['pred_j2d_boxes'][idx].detach().cpu()
+            #         # pred_boxes = box_cxcywh_to_xyxy(pred_boxes) 
+            #         # pred_boxes = outputs['pred_boxes'][idx].detach().cpu() * model.input_size
+            #         # pred_boxes = box_cxcywh_to_xyxy(pred_boxes)
 
-                    # for box in pred_boxes.int().tolist():
-                    #     x1, y1, x2, y2 = box
-                    #     cv2.rectangle(pred_mesh_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            #         # for box in pred_boxes.int().tolist():
+            #         #     x1, y1, x2, y2 = box
+            #         #     cv2.rectangle(pred_mesh_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                    # for box_idx, tid in enumerate(outputs['active_ids']):
-                    #     x1, y1, x2, y2 = pred_boxes[box_idx].int().tolist()
-                    #     # kfx1, kfy1, kfx2, kfy2 = model.tracker.tracks[tid]['kf'].get_xyxy().tolist()
-                    #     cv2.rectangle(pred_mesh_img, (x1, y1), (x2, y2), (255, 0, 255), 2)
-                    #     # cv2.rectangle(pred_mesh_img, (int(kfx1), int(kfy1)), (int(kfx2), int(kfy2)), (0, 255, 0), 4)
-                    #     cv2.putText(
-                    #         pred_mesh_img,
-                    #         f"{tid}",
-                    #         (x1, y1 - 5),
-                    #         cv2.FONT_HERSHEY_SIMPLEX,
-                    #         0.8,
-                    #         (255, 0, 255),
-                    #         2,
-                    #         cv2.LINE_AA
-                    #     )
-                    # pred_mesh_img = vis_boxes(pred_mesh_img, pred_boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
+            #         # for box_idx, tid in enumerate(outputs['active_ids']):
+            #         #     x1, y1, x2, y2 = pred_boxes[box_idx].int().tolist()
+            #         #     # kfx1, kfy1, kfx2, kfy2 = model.tracker.tracks[tid]['kf'].get_xyxy().tolist()
+            #         #     cv2.rectangle(pred_mesh_img, (x1, y1), (x2, y2), (255, 0, 255), 2)
+            #         #     # cv2.rectangle(pred_mesh_img, (int(kfx1), int(kfy1)), (int(kfx2), int(kfy2)), (0, 255, 0), 4)
+            #         #     cv2.putText(
+            #         #         pred_mesh_img,
+            #         #         f"{tid}",
+            #         #         (x1, y1 - 5),
+            #         #         cv2.FONT_HERSHEY_SIMPLEX,
+            #         #         0.8,
+            #         #         (255, 0, 255),
+            #         #         2,
+            #         #         cv2.LINE_AA
+            #         #     )
+            #         # pred_mesh_img = vis_boxes(pred_mesh_img, pred_boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
 
-                    # select_queries_idx = torch.where(outputs['pred_confs'][idx] > conf_thresh)[0]
-                    # ori_pred_boxes = outputs['ori_pred_boxes'][idx][select_queries_idx]
-                    # ori_pred_boxes = box_cxcywh_to_xyxy(ori_pred_boxes) * model.input_size
-                    # pred_mesh_img = vis_boxes(pred_mesh_img, ori_pred_boxes, color = (0,255,0))[:img_size[0],:img_size[1]]
-                    cv2.imwrite(os.path.join(results_save_path, f'{img_name}.png'), pred_mesh_img)
-                    # import pdb; pdb.set_trace()
+            #         # select_queries_idx = torch.where(outputs['pred_confs'][idx] > conf_thresh)[0]
+            #         # ori_pred_boxes = outputs['ori_pred_boxes'][idx][select_queries_idx]
+            #         # ori_pred_boxes = box_cxcywh_to_xyxy(ori_pred_boxes) * model.input_size
+            #         # pred_mesh_img = vis_boxes(pred_mesh_img, ori_pred_boxes, color = (0,255,0))[:img_size[0],:img_size[1]]
+            #         cv2.imwrite(os.path.join(results_save_path, f'{img_name}.png'), pred_mesh_img)
+            #         # import pdb; pdb.set_trace()
 
-            pred_boxes = outputs['pred_j2d_boxes'][idx].detach().cpu()
-            pred_boxes = box_cxcywh_to_xyxy(pred_boxes) 
-            for box_idx, tid in enumerate(outputs['active_ids']):
-                x1, y1, x2, y2 = pred_boxes[box_idx].int().tolist()
-                print(itr, tid, x1, y1, x2, y2)
+            # pred_boxes = outputs['pred_j2d_boxes'][idx].detach().cpu()
+            # pred_boxes = box_cxcywh_to_xyxy(pred_boxes) 
+            # for box_idx, tid in enumerate(outputs['active_ids']):
+            #     x1, y1, x2, y2 = pred_boxes[box_idx].int().tolist()
 
-            # print(len(outputs['pred_verts'][0]))
-            # print(model.tracker.active_ids)
+            # # print(len(outputs['pred_verts'][0]))
+            # # print(model.tracker.active_ids)
             ori_img_size = targets[0]['ori_img_size']
             img_size = targets[0]['img_size']
             def save_tracking_to_csv(frame_id, tracker, file_path, img_size, ori_img_size, overlap_iou=0.8):
@@ -1370,6 +1388,10 @@ def eval_bedlam_track(model, infer_dataloader, conf_thresh, results_save_path = 
                 ori_img_size=ori_img_size,
                 overlap_iou=0.8
             )
+
+            time_file_path = os.path.dirname(save_path)
+            with open(f"{time_file_path}/inference_times.json", "w") as f:
+                json.dump(times, f, indent=4)
         
             # per-batch aggregators
             batch_count = []

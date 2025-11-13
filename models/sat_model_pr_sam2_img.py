@@ -1190,7 +1190,9 @@ class ImageModel(nn.Module):
 
                 attn_weights = self.prompt_cross_attn(q=pr_points, k=embedweight, v=embedweight)[:, 0, :, :]
                 pr_tgt = torch.matmul(attn_weights, tgt)
-                
+
+        if 'is_trkquery' in targets[0] and not targets[0]['is_trkquery']:
+            _boxes = []
         # print(len(_boxes))
 
         # pr_tgt, pr_points, pr_attn_mask, prompt_dn_meta =\
@@ -1319,7 +1321,6 @@ class ImageModel(nn.Module):
             # if pr_block is not None:
             #     attn_mask[pr_s:pr_e, pr_s:pr_e] |= pr_block
             # attn_mask = None
-
         tgt_lens = [tgt.shape[1]]*bs
 
         hs, reference = self.decoder(memory=final_features, memory_lens=token_lens,

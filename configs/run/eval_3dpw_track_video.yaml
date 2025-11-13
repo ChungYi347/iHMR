@@ -31,3 +31,4 @@ video_model: True
 video_stride: 8
 
 total_gpus: 1
+memory_update_type: 'sim'

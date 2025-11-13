@@ -1,6 +1,138 @@
 import torch 
 from utils.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, nms_xyxy, box_iou_xyxy
 import torch.nn.functional as F
+import math
+
+# class TorchKalman:
+#     """
+#     Linear KF on torch tensors
+#     state x = [cx, cy, w, h, vx, vy, vw, vh]^T (8,)
+#     meas  z = [cx, cy, w, h]^T (4,)
+#     Constant-velocity model with dt.
+#     """
+#     def __init__(self, dt=1.0, device="cpu", q_pos=1e-2, q_vel=1e-1, r_meas=1.0, input_size=1288,
+#                 size_vel_damp=0.85,max_size_step=5.0):
+#         self.device = torch.device(device)
+#         self.dt = dt
+#         self.input_size = input_size
+#         self.size_vel_damp = size_vel_damp
+#         self.max_size_step = max_size_step
+
+#         F = torch.eye(8, device=self.device)
+#         F[0,4] = dt; F[1,5] = dt; F[2,6] = dt; F[3,7] = dt
+#         H = torch.zeros((4,8), device=self.device)
+#         H[0,0]=H[1,1]=H[2,2]=H[3,3]=1.0
+
+#         Q = torch.diag(torch.tensor(
+#             [q_pos, q_pos, q_pos, q_pos, q_vel, q_vel, q_vel, q_vel],
+#             device=self.device))
+#         R = torch.diag(torch.full((4,), float(r_meas), device=self.device))
+
+#         self.F, self.H, self.Q, self.R = F, H, Q, R
+#         self.x = torch.zeros(8, device=self.device)     # state
+#         self.P = torch.eye(8, device=self.device)       # covariance
+
+#         # Init covariance scales (위치/크기 vs 속도)
+#         self.P[0:4,0:4] *= 10.0
+#         self.P[4:8,4:8] *= 1000.0
+
+#     @torch.no_grad()
+#     def init_from_xyxy(self, box_xyxy):
+#         # set x[:4] from bbox, zero velocities
+#         z = box_xyxy_to_cxcywh(box_xyxy.unsqueeze(0)).squeeze(0)
+#         self.x[:4] = z
+#         self.x[4:] = 0.0
+
+#     @torch.no_grad()
+#     def predict(self):
+#         # x = F x ; P = F P F^T + Q
+#         prev_w, prev_h = self.x[2].item(), self.x[3].item()
+
+#         self.x = self.F @ self.x
+#         self.P = self.F @ self.P @ self.F.T + self.Q
+#         # clamp sizes
+#         self.x[2] = torch.clamp(self.x[2], min=1.0)
+#         self.x[3] = torch.clamp(self.x[3], min=1.0)
+#         self.x[6] *= self.size_vel_damp
+#         self.x[7] *= self.size_vel_damp
+
+#         return self.get_xyxy()
+
+#     @torch.no_grad()
+#     def update(self, meas_cxcywh, occ_area_drop_thresh=0.85, max_occ_area_drop_thresh=1.15, is_occlusion=False):
+#         prev = self.x.clone()
+#         z = meas_cxcywh
+#         z_pred = self.H @ self.x
+#         y = z - z_pred
+
+#         prev_area = (prev[2] * prev[3]).clamp(min=1.0)
+#         meas_area = (z[2] * z[3]).clamp(min=1.0)
+#         area_ratio = (meas_area / prev_area).item()
+
+#         S = self.H @ self.P @ self.H.T + self.R
+#         K = self.P @ self.H.T @ torch.linalg.inv(S)
+
+#         # if area_ratio < occ_area_drop_thresh or area_ratio > max_occ_area_drop_thresh:
+#         #     y[2] = 0.0  # w
+#         #     y[3] = 0.0  # h
+
+#         self.x = self.x + K @ y
+#         I = torch.eye(8, device=self.x.device)
+#         self.P = (I - K @ self.H) @ self.P
+
+#         self.x[6] *= 0.5  # vw
+#         self.x[7] *= 0.5  # vh
+
+#         self.x[2] = torch.clamp(self.x[2], min=1.0)
+#         self.x[3] = torch.clamp(self.x[3], min=1.0)
+#         return self.get_xyxy()
+
+#     @torch.no_grad()
+#     def get_xyxy(self):
+#         b = self.x[:4].unsqueeze(0)                           # (1,4) cxcywh
+#         return box_cxcywh_to_xyxy(b/self.input_size).squeeze(0) *self.input_size
+
+def get_similarity(mk: torch.Tensor,
+                   ms: torch.Tensor,
+                   qk: torch.Tensor,
+                   qe: torch.Tensor,
+                   add_batch_dim=False) -> torch.Tensor:
+    # used for training/inference and memory reading/memory potentiation
+    # mk: B x CK x [N]    - Memory keys
+    # ms: B x  1 x [N]    - Memory shrinkage
+    # qk: B x CK x [HW/P] - Query keys
+    # qe: B x CK x [HW/P] - Query selection
+    # Dimensions in [] are flattened
+    if add_batch_dim:
+        mk, ms = mk.unsqueeze(0), ms.unsqueeze(0)
+        qk, qe = qk.unsqueeze(0), qe.unsqueeze(0)
+
+    CK = mk.shape[1]
+    mk = mk.flatten(start_dim=2)
+    ms = ms.flatten(start_dim=1).unsqueeze(2) if ms is not None else None
+    qk = qk.flatten(start_dim=2)
+    qe = qe.flatten(start_dim=2) if qe is not None else None
+
+    if qe is not None:
+        # See XMem's appendix for derivation
+        mk = mk.transpose(1, 2)
+        a_sq = (mk.pow(2) @ qe)
+        two_ab = 2 * (mk @ (qk * qe))
+        b_sq = (qe * qk.pow(2)).sum(1, keepdim=True)
+        similarity = (-a_sq + two_ab - b_sq)
+    else:
+        # similar to STCN if we don't have the selection term
+        a_sq = mk.pow(2).sum(1).unsqueeze(2)
+        two_ab = 2 * (mk.transpose(1, 2) @ qk)
+        similarity = (-a_sq + two_ab)
+
+    if ms is not None:
+        similarity = similarity * ms / math.sqrt(CK)  # B*N*HW
+    else:
+        similarity = similarity / math.sqrt(CK)  # B*N*HW
+
+    return similarity
+
 
 class TorchKalman:
     """
@@ -213,7 +345,7 @@ class QueryTracker:
 
         self.next_id = 0
         self.tracks = {}
-        self.prev_query_num = 3
+        self.prev_query_num = 2
 
     def reset(self):
         self.next_id = 0
@@ -227,7 +359,7 @@ class QueryTracker:
         return box_cxcywh_to_xyxy(boxes)
 
     @torch.no_grad()
-    def init_frame(self, boxes, confs, query_indices, kps=None, querys=None, ori_querys=None, nms_iou=0.3, gt_boxes=None):
+    def init_frame(self, boxes, confs, query_indices, kps=None, querys=None, nms_iou=0.3, gt_boxes=None):
         if boxes.numel() == 0:
             return []
 
@@ -314,53 +446,7 @@ class QueryTracker:
         return active_ids
 
     @torch.no_grad()
-    def add_from_gt(self, boxes, confs, query_indices, kps=None, querys=None, ori_querys=None,  nms_iou=0.3, gt_boxes=None):
-        if boxes.numel() == 0:
-            return []
-        
-        boxes_xyxy = boxes.clone()
-        boxes_xyxy[:, 0] = boxes[:, 0] - boxes[:, 2] / 2  # x1
-        boxes_xyxy[:, 1] = boxes[:, 1] - boxes[:, 3] / 2  # y1
-        boxes_xyxy[:, 2] = boxes[:, 0] + boxes[:, 2] / 2  # x2
-        boxes_xyxy[:, 3] = boxes[:, 1] + boxes[:, 3] / 2  # y2
-        # valid = confs > self.conf_thresh 
-        active_ids = []
-        device = boxes.device
-        for b, c, q, k, query in zip(boxes_xyxy, confs, query_indices, kps, querys):
-            # if c < self.conf_thresh:
-            #     continue
-            tid = self.next_id
-            
-            # Initialize Kalman Filter
-            kf = TorchKalman(dt=self.dt, device=device)
-            kf.init_from_xyxy(b)
-            
-            # Original code (without Kalman Filter):
-            # self.tracks[tid] = {
-            #     "box": b.detach(),
-            #     "age": 0,
-            #     "query_idx": int(q),   
-            #     "origin_qidx": int(q),
-            #     "kps": k.detach(),
-            #     "query": query.detach(),
-            # }
-            
-            self.tracks[tid] = {
-                "box": b.detach(),
-                "age": 0,
-                "query_idx": int(q),   
-                "origin_qidx": int(q),
-                "kps": k.detach(),
-                "query": query.detach(),
-                "kf": kf,
-                "prev_query_list": [query.detach().clone()],
-            }
-            active_ids.append(tid)
-            self.next_id += 1
-        return active_ids
-
-    @torch.no_grad()
-    def update(self, boxes, confs, query_indices, kp2ds=None, querys=None, ori_querys=None, gt_boxes=None, overlap_iou=0.8):
+    def update(self, boxes, confs, query_indices, kp2ds=None, querys=None, gt_boxes=None, overlap_iou=0.8):
         """
         Update policy:
         1) Update tracks via greedy IoU matching (save prev_box/prev_query just before applying the match).
@@ -406,10 +492,7 @@ class QueryTracker:
             pr_valid = confs >= self.pr_conf_thresh
             pr_valid[len(active_matched_ids):] = False
 
-        # print(confs[:len(active_matched_ids)])
-
         valid = pr_valid | valid
-        # print(active_matched_ids, valid)
         # valid = confs >= self.conf_thresh
         # boxes_v_xyxy   = boxes_xyxy[valid]
         # # boxes_v_cxcywh = boxes_cxcywh[valid]
@@ -424,7 +507,6 @@ class QueryTracker:
         # kp2ds_v = kp2ds[valid]
         # querys = querys[0]
         # querys_v = querys[valid]
-        # print(self.frame_id,confs)
         
         # Added for Kalman Filter (cxcywh format needed for KF update)
         boxes_v_cxcywh = box_xyxy_to_cxcywh(boxes_v) if boxes_v.numel() > 0 else boxes_v
@@ -491,14 +573,28 @@ class QueryTracker:
                 # IoU against predicted boxes from Kalman Filter (shape: T x D)
                 iou_mat = box_iou_xyxy(pred_boxes_stack, boxes_v)
 
-                prev_querys_stack = torch.stack([self.tracks[tid]["query"] for tid in track_ids], dim=0)
-                # prev_querys_stack = torch.stack([torch.mean(torch.stack(self.tracks[tid]["prev_query_list"]), 0) for tid in track_ids], dim=0)
+                # prev_querys_stack = torch.stack([self.tracks[tid]["query"] for tid in track_ids], dim=0)
+                prev_querys_stack = torch.stack([torch.mean(torch.stack(self.tracks[tid]["prev_query_list"]), 0) for tid in track_ids], dim=0)
 
                 cos_sim = F.cosine_similarity(
                     prev_querys_stack.unsqueeze(1),  # [2,1,768]
                     querys_v.unsqueeze(0),      # [1,52,768]
                     dim=-1
                 )  # [2,52]
+                # print(cos_sim)
+
+                # B, L, C = prev_querys_stack[None].shape
+                # _, S, _ = querys_v[None].shape
+                # mk = querys_v[None].permute(0, 2, 1).contiguous()
+                # qk = prev_querys_stack[None].permute(0, 2, 1).contiguous()
+                # qe = None
+                # ms = torch.ones(B, 1, S, device=prev_querys_stack.device, dtype=prev_querys_stack.dtype)
+                # # slot_mask = bias[:, 0].any(dim=1)   # (B,S)  True=mask
+                # # ms[:, slot_mask] = 0.0
+                # sim = get_similarity(mk=mk, ms=ms, qk=qk, qe=qe, add_batch_dim=False)
+                # sim = sim[0].permute(1,0)
+                # iou_mat = sim
+                # # print(sim)
 
 
                 # prev_keypoints = torch.stack([self.tracks[tid]["kps"] for tid in track_ids], dim=0)
@@ -510,18 +606,22 @@ class QueryTracker:
 
                 # Greedy matching in descending IoU
                 # coords = torch.nonzero((iou_mat * 0.5 + oks_matrix * 2 * 0.5) >= self.iou_match_thresh, as_tuple=False)
-                # iou_mat = iou_mat * 0.5 + cos_sim * 0.5
-                # iou_mat = cos_sim 
-                # iou_mat = iou_mat
                 iou_mat = iou_mat * 0.1 + cos_sim * 0.9
+                # iou_mat = iou_mat * 0.9 + cos_sim * 0.1
+                # iou_mat = iou_mat
+                # iou_mat = iou_mat * 0.1 + cos_sim * 0.9
                 # iou_mat = iou_mat # * 0.1 + cos_sim * 0.9
                 # iou_mat = iou_mat * 0.1 + oks_matrix * 0.6 + cos_sim * 0.3
 
                 # iou_mat = iou_mat * 0.2 + oks_matrix * 0.4 + cos_sim * 0.4
                 # coords = torch.nonzero((iou_mat) >= self.iou_match_thresh, as_tuple=False)
                 coords = torch.nonzero((iou_mat) >= self.iou_match_thresh, as_tuple=False)
+                # coords = torch.tensor([[0,0], [1,1]]).to(device=coords.device)
                 used_tracks, matched_dets = set(), set()
                 tracking_ids = []
+                # if self.frame_id > 112:
+                # print(iou_mat, coords, confs[:2])
+                # import pdb; pdb.set_trace()
 
                 if coords.numel() > 0:
                     scores = iou_mat[coords[:, 0], coords[:, 1]]
@@ -537,7 +637,7 @@ class QueryTracker:
                         # if t in used_tracks:
                         #     continue
 
-                        # if d in matched_dets:
+                        # if d in matched_dets and self.is_add_new:
                         #     if not self.is_add_new:
                         #         t_mask = (coords[:, 0] == t)
                         #         t_rows = torch.nonzero(t_mask, as_tuple=False).squeeze(1)
@@ -607,6 +707,7 @@ class QueryTracker:
                         #     self.tracks[tid]["box"] = new_xyxy.detach()
                         # else:
                         self.tracks[tid]["box"] = boxes_v[d].detach()
+                        # print(boxes_v[d].detach())
                         
                         self.tracks[tid]["kps"] = kp2ds_v[d].detach()
                         self.tracks[tid]["query"] = querys_v[d].detach()
@@ -657,9 +758,7 @@ class QueryTracker:
                                 continue
                             ious_curr = box_iou_xyxy(curr_boxes_stack, boxes_v[d].unsqueeze(0)).squeeze(1)  # (N,)
                             max_iou_curr = float(ious_curr.max().item()) if ious_curr.numel() > 0 else 0.0
-                            # keep_mask_current.append(max_iou_curr < self.iou_new_thresh and confs_v[d] >= self.conf_thresh)
-                            keep_mask_current.append(max_iou_curr < self.iou_new_thresh and confs_v[d] >= self.conf_thresh+0.2)
-                            # keep_mask_current.append(max_iou_curr < self.iou_new_thresh and confs_v[d] >= self.conf_thresh+0.15)
+                            keep_mask_current.append(max_iou_curr < self.iou_new_thresh and confs_v[d] >= self.conf_thresh+0.2)#*self.crowd)
                             # if max_iou_curr < self.iou_new_thresh and confs_v[d] >= self.conf_thresh+0.2:
                             #     print( max_iou_curr, confs_v[d], self.conf_thresh+0.2, self.iou_new_thresh)
                             # keep_mask_current.append(max_iou_curr < self.iou_new_thresh and confs_v[d] >= self.conf_thresh)
@@ -822,12 +921,12 @@ class QueryTracker:
                                 "prev_query_list": [querys_v[d].detach().clone()],
                             }
             # import pdb; pdb.set_trae()
-        # if self.frame_id > 107:
+        # if self.frame_id > 110:
+        #     import pdb; pdb.set_trace()
         #     import numpy as np
         #     tdets = np.array(list(used_tracks))
         #     _track_ids = np.array(track_ids)
         #     # track_ids
-        #     import pdb; pdb.set_trace()
             
 
         # --- 3) Resolve track–track conflicts: within any IoU>=overlap_iou group keep only the most self-consistent track ---
@@ -908,6 +1007,686 @@ class QueryTracker:
         self.active_ids = active_matched_ids
         # print(self.active_ids, self.next_id)
         return active_matched_ids, id2qidx, id2origin
+
+# class QueryTracker:
+#     def __init__(self,
+#                  conf_thresh=0.5,
+#                  iou_match_thresh=0.5,
+#                  iou_new_thresh=0.5,
+#                  max_age=15,
+#                  boxes_format="xyxy",
+#                  pr_conf_thresh=0.9,
+#                  is_add_new=True,
+#                  is_size_filter=True,
+#                  nms_threshold=0.7,
+#                  dt=1.0,
+#                  input_size=1288):
+#         self.conf_thresh = conf_thresh
+#         self.iou_match_thresh = iou_match_thresh
+#         self.iou_new_thresh = iou_new_thresh
+#         self.max_age = max_age
+#         assert boxes_format in ("xyxy", "cxcywh")
+#         self.boxes_format = boxes_format
+#         self.pr_conf_thresh=pr_conf_thresh
+#         self.is_add_new = is_add_new
+#         self.is_size_filter = is_size_filter
+#         self.nms_threshold = nms_threshold
+#         self.dt = dt
+#         self.input_size = input_size
+
+#         self.next_id = 0
+#         self.tracks = {}
+#         self.prev_query_num = 20
+
+#     def reset(self):
+#         self.next_id = 0
+#         self.tracks = {}
+
+#     def _to_xyxy(self, boxes):
+#         if boxes.numel() == 0:
+#             return boxes
+#         if self.boxes_format == "xyxy":
+#             return boxes
+#         return box_cxcywh_to_xyxy(boxes/self.input_size) * self.input_size
+
+#     @torch.no_grad()
+#     def init_frame(self, boxes, confs, query_indices, kps=None, querys=None, nms_iou=0.3, gt_boxes=None):
+#         if boxes.numel() == 0:
+#             return []
+
+#         boxes_xyxy = boxes
+#         if self.is_add_new:
+#             # posetrack
+#             # valid = confs > self.conf_thresh
+#             # valid = confs > self.conf_thresh 
+#             valid = confs > self.conf_thresh + 0.2
+#         else:
+#             valid = confs > self.conf_thresh 
+#         boxes_xyxy = boxes_xyxy[valid]
+#         confs = confs[valid]
+#         query_indices  = query_indices[valid]
+#         kps = kps[valid]
+#         querys = querys[valid]
+
+#         keep = nms_xyxy(boxes_xyxy, confs, iou_thresh=nms_iou)
+#         if keep.numel() == 0:
+#             return []
+
+#         keep_boxes = boxes_xyxy[keep]
+#         keep_confs = confs[keep]
+#         keep_qidx  = query_indices[keep]
+#         keep_kps = kps[keep]
+#         keep_query = querys[keep]
+
+#         if gt_boxes is not None:
+#             gt = gt_boxes.to(keep_boxes.device).float()  # [N, 4]
+#             kb = keep_boxes  # [M, 4]
+
+#             x1 = torch.maximum(kb[:, None, 0], gt[None, :, 0])
+#             y1 = torch.maximum(kb[:, None, 1], gt[None, :, 1])
+#             x2 = torch.minimum(kb[:, None, 2], gt[None, :, 2])
+#             y2 = torch.minimum(kb[:, None, 3], gt[None, :, 3])
+
+#             inter = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
+#             area_k = ((kb[:, 2] - kb[:, 0]) * (kb[:, 3] - kb[:, 1]))[:, None]
+#             area_g = ((gt[:, 2] - gt[:, 0]) * (gt[:, 3] - gt[:, 1]))[None, :]
+#             union = area_k + area_g - inter + 1e-6
+
+#             ious = inter / union  # [M, N]
+#             best_iou, best_gt_idx = ious.max(dim=0)
+#             # max_idx = best_iou.argmax()
+#             # max_idx = best_gt_idx[:len(gt_boxes)]
+#             keep_boxes = keep_boxes[best_gt_idx]
+#             keep_confs = keep_confs[best_gt_idx]
+#             keep_qidx = keep_qidx[best_gt_idx]
+#             keep_kps = keep_kps[best_gt_idx]
+#             keep_query = keep_query[best_gt_idx]
+
+#         active_ids = []
+#         device = keep_boxes.device
+#         for b, c, q, k, query in zip(keep_boxes, keep_confs, keep_qidx, keep_kps, keep_query):
+#             if c < self.conf_thresh:
+#                 continue
+#             tid = self.next_id
+#             self.next_id += 1
+            
+#             # Initialize Kalman Filter
+#             kf = TorchKalman(dt=self.dt, device=device)
+#             kf.init_from_xyxy(b)
+            
+#             # Original code (without Kalman Filter):
+#             # self.tracks[tid] = {
+#             #     "box": b.detach(),
+#             #     "age": 0,
+#             #     "query_idx": int(q),   
+#             #     "origin_qidx": int(q),
+#             #     "kps": k.detach(),
+#             #     "query": query.detach(),
+#             # }
+            
+#             self.tracks[tid] = {
+#                 "box": b.detach(),
+#                 "age": 0,
+#                 "query_idx": int(q),   
+#                 "origin_qidx": int(q),
+#                 "kps": k.detach(),
+#                 "query": query.detach(),
+#                 "kf": kf,
+#             }
+#             active_ids.append(tid)
+#         return active_ids
+
+#     @torch.no_grad()
+#     def update(self, boxes, confs, query_indices, kp2ds=None, querys=None, gt_boxes=None, overlap_iou=0.8):
+#         """
+#         Update policy:
+#         1) Update tracks via greedy IoU matching (save prev_box/prev_query just before applying the match).
+#         2) If updated tracks overlap each other with IoU >= overlap_iou, compute each track's
+#         self-consistency IoU = IoU(prev_box, curr_box); keep the one with larger value (i.e., moved less),
+#         and rollback the others' updates for this frame (only age++ for them).
+#         3) Drop stale tracks and return results.
+#         """
+#         boxes_xyxy = self._to_xyxy(boxes)
+
+#         # --- 0) Snapshots for rollback (state before this frame's update) & age++ baseline ---
+#         prev_box = {}
+#         prev_age = {}
+#         prev_qid = {}
+#         prev_kps = {}
+#         for tid in list(self.tracks.keys()):
+#             prev_box[tid] = self.tracks[tid]["box"].clone()
+#             prev_age[tid] = self.tracks[tid]["age"]
+#             prev_qid[tid] = self.tracks[tid]["query_idx"]
+#             prev_qid[tid] = self.tracks[tid]["kps"]
+#             prev_qid[tid] = self.tracks[tid]["query"]
+#             # default +1; will reset to 0 if matched
+#             self.tracks[tid]["age"] += 1
+
+#         widths  = boxes_xyxy[:, 2] - boxes_xyxy[:, 0]
+#         heights = boxes_xyxy[:, 3] - boxes_xyxy[:, 1]
+#         min_w, min_h = 50, 50  
+
+#         # valid = confs >= self.conf_thresh
+#         # valid_idx = torch.nonzero(valid, as_tuple=True)[0]
+#         # valid_idx = torch.where(valid)[0]
+        
+#         active_matched_ids = [tid for tid in self.tracks.keys() if self.tracks[tid]["age"] == 1]
+#         if self.is_size_filter:
+#             size_valid = (widths >= min_w) & (heights >= min_h)
+#             valid = (confs >= self.conf_thresh) & size_valid
+#             valid[:len(active_matched_ids)] = False
+#             pr_valid = (confs >= self.pr_conf_thresh) & size_valid
+#             pr_valid[len(active_matched_ids):] = False
+#         else:
+#             valid = confs >= self.conf_thresh
+#             valid[:len(active_matched_ids)] = False
+#             pr_valid = confs >= self.pr_conf_thresh
+#             pr_valid[len(active_matched_ids):] = False
+
+#         # valid = pr_valid | valid
+#         # valid = confs >= self.conf_thresh
+#         # boxes_v_xyxy   = boxes_xyxy[valid]
+#         # # boxes_v_cxcywh = boxes_cxcywh[valid]
+#         # confs_v        = confs[valid]
+#         # qidx_v         = query_indices[valid]
+
+#         # --- 1) Keep only valid detections by confidence ---
+#         boxes_v = boxes_xyxy[valid]
+#         # Original code:
+#         # confs_v = confs[valid]
+#         # qidx_v = query_indices[valid]
+#         # kp2ds_v = kp2ds[valid]
+#         # querys = querys[0]
+#         # querys_v = querys[valid]
+        
+#         # Added for Kalman Filter (cxcywh format needed for KF update)
+#         boxes_v_cxcywh = box_xyxy_to_cxcywh(boxes_v) if boxes_v.numel() > 0 else boxes_v
+#         confs_v = confs[valid]
+#         qidx_v = query_indices[valid]
+#         kp2ds_v = kp2ds[valid]
+#         querys = querys[0]
+#         querys_v = querys[valid]
+
+#         # posetrack: 0.7
+#         # 3dpw: 0.99
+#         if self.nms_threshold != 1.0:
+#             keep_nms = nms_xyxy(boxes_v, confs_v, iou_thresh=self.nms_threshold)
+
+#             boxes_v = boxes_v[keep_nms]
+#             # Original code:
+#             # confs_v = confs_v[keep_nms]
+#             # qidx_v = qidx_v[keep_nms]
+#             # kp2ds_v = kp2ds_v[keep_nms]
+#             # querys_v = querys_v[keep_nms]
+            
+#             # Added for Kalman Filter
+#             boxes_v_cxcywh = boxes_v_cxcywh[keep_nms] if boxes_v_cxcywh.numel() > 0 else boxes_v_cxcywh
+#             confs_v = confs_v[keep_nms]
+#             qidx_v = qidx_v[keep_nms]
+#             kp2ds_v = kp2ds_v[keep_nms]
+#             querys_v = querys_v[keep_nms]
+
+#         # --- 2) If no tracks yet, initialize from current frame ---
+#         if len(self.tracks) == 0:
+#             # _ = self.init_frame(boxes_v, confs_v, qidx_v, kps=kp2ds_v, gt_boxes=gt_boxes, querys=querys_v, nms_iou=0.3)
+#             # posetrack
+#             _ = self.init_frame(boxes_v, confs_v, qidx_v, kps=kp2ds_v, gt_boxes=gt_boxes, querys=querys_v, nms_iou=0.7)
+#             # Ensure new tracks start with prev_box = box
+#             for tid in self.tracks:
+#                 if "prev_box" not in self.tracks[tid]:
+#                     self.tracks[tid]["prev_box"] = self.tracks[tid]["box"].clone()
+#                 if "prev_kps" not in self.tracks[tid]:
+#                     self.tracks[tid]["prev_kps"] = self.tracks[tid]["kps"].clone()
+#                 if "prev_query" not in self.tracks[tid]:
+#                     self.tracks[tid]["prev_query"] = self.tracks[tid]["query"].clone()
+#                     self.tracks[tid]["prev_query_list"] = [self.tracks[tid]["query"].clone()]
+
+#         else:
+#             track_ids = list(self.tracks.keys())
+
+#             if boxes_v.numel() > 0 and len(track_ids) > 0:
+#                 # Original code (IoU against previous boxes):
+#                 # prev_boxes_stack = torch.stack([self.tracks[tid]["box"] for tid in track_ids], dim=0)
+#                 # iou_mat = box_iou_xyxy(prev_boxes_stack, boxes_v)
+                
+#                 # 1) Kalman Filter predict step for all tracks
+#                 pred_boxes = []
+#                 for tid in track_ids:
+#                     if "kf" in self.tracks[tid]:
+#                         pred_xyxy = self.tracks[tid]["kf"].predict()
+#                         pred_boxes.append(pred_xyxy.unsqueeze(0))
+#                     else:
+#                         # If KF doesn't exist (backward compatibility), use current box
+#                         pred_boxes.append(self.tracks[tid]["box"].unsqueeze(0))
+                
+#                 pred_boxes_stack = torch.cat(pred_boxes, dim=0) if pred_boxes else boxes_v.new_zeros((0, 4))
+                
+#                 # IoU against predicted boxes from Kalman Filter (shape: T x D)
+#                 iou_mat = box_iou_xyxy(pred_boxes_stack, boxes_v)
+
+#                 prev_querys_stack = torch.stack([self.tracks[tid]["query"] for tid in track_ids], dim=0)
+#                 prev_querys_stack = torch.stack([torch.mean(torch.stack(self.tracks[tid]["prev_query_list"]), 0) for tid in track_ids], dim=0)
+
+#                 cos_sim = F.cosine_similarity(
+#                     prev_querys_stack.unsqueeze(1),  # [2,1,768]
+#                     querys_v.unsqueeze(0),      # [1,52,768]
+#                     dim=-1
+#                 )  # [2,52]
+
+
+#                 # prev_keypoints = torch.stack([self.tracks[tid]["kps"] for tid in track_ids], dim=0)
+#                 # p = torch.tensor(prev_keypoints) / 1288
+#                 # c = torch.ones_like(p[..., 0])
+#                 # p2 = torch.tensor(kp2ds_v) / 1288
+#                 # c2 = torch.ones_like(p2[..., 0])
+#                 # oks_matrix = normalized_weighted_score(p, c, p2, c2)  # shape: [N, M]
+
+#                 # Greedy matching in descending IoU
+#                 # coords = torch.nonzero((iou_mat * 0.5 + oks_matrix * 2 * 0.5) >= self.iou_match_thresh, as_tuple=False)
+#                 # iou_mat = iou_mat * 0.1 + cos_sim * 0.9
+#                 # iou_mat = cos_sim * 1.0
+#                 # iou_mat = iou_mat
+#                 iou_mat = iou_mat * 0.5 + cos_sim * 0.5
+#                 # iou_mat = iou_mat # * 0.1 + cos_sim * 0.9
+#                 # iou_mat = iou_mat * 0.1 + oks_matrix * 0.6 + cos_sim * 0.3
+
+#                 # iou_mat = iou_mat * 0.2 + oks_matrix * 0.4 + cos_sim * 0.4
+#                 # coords = torch.nonzero((iou_mat) >= self.iou_match_thresh, as_tuple=False)
+#                 coords = torch.nonzero((iou_mat) >= self.iou_match_thresh, as_tuple=False)
+#                 used_tracks, matched_dets = set(), set()
+#                 tracking_ids = []
+
+#                 active_curr_ids = list(self.tracks.keys())
+#                 if coords.numel() > 0:
+#                     scores = iou_mat[coords[:, 0], coords[:, 1]]
+#                     order = torch.argsort(scores, descending=True)
+
+#                     for k in order.tolist():
+#                         t = coords[k, 0].item()
+#                         d = coords[k, 1].item()
+
+#                         # if t in used_tracks or d in matched_dets:
+#                         #     continue
+
+#                         if t in used_tracks:
+#                             continue
+
+#                         # track_bboxes = torch.stack([self.tracks[tid]["box"] for tid in active_curr_ids], dim=0)
+#                         # tid = track_ids[t]
+#                         # track_bboxes[tid] = 0
+#                         # ious_curr = box_iou_xyxy(boxes_v[d].unsqueeze(0), track_bboxes).squeeze(1)  # (N,)
+#                         # max_iou_curr = float(ious_curr.max().item()) if ious_curr.numel() > 0 else 0.0
+
+#                         if d in matched_dets:
+#                             if not self.is_add_new:
+#                                 t_mask = (coords[:, 0] == t)
+#                                 t_rows = torch.nonzero(t_mask, as_tuple=False).squeeze(1)
+#                                 t_scores = scores[t_rows]
+#                                 t_local_order = torch.argsort(t_scores, descending=True).tolist()
+
+#                                 found = False
+#                                 for r in [t_rows[i].item() for i in t_local_order]:
+#                                     d2 = coords[r, 1].item()
+#                                     if d2 == d or d2 in matched_dets:
+#                                         continue
+
+#                                     tid = track_ids[t]
+#                                     tracking_ids.append(tid)
+
+#                                     self.tracks[tid]["prev_box"] = self.tracks[tid]["box"].clone()
+#                                     self.tracks[tid]["prev_kps"] = self.tracks[tid]["kps"].clone()
+#                                     self.tracks[tid]["prev_query"] = self.tracks[tid]["query"].clone()
+#                                     self.tracks[tid]["prev_query_idx"] = self.tracks[tid]["query_idx"]
+
+#                                     # Original code:
+#                                     # self.tracks[tid]["box"] = boxes_v[d2].detach()
+                                    
+#                                     # Update Kalman Filter with measurement
+#                                     if "kf" in self.tracks[tid]:
+#                                         meas = boxes_v_cxcywh[d2]
+#                                         # new_xyxy = self.tracks[tid]["kf"].update(meas, is_occlusion=max_iou_curr>0.5)
+#                                         new_xyxy = self.tracks[tid]["kf"].update(meas)
+#                                         self.tracks[tid]["kf_box"] = new_xyxy.detach()
+#                                     self.tracks[tid]["box"] = boxes_v[d2].detach()
+                                    
+#                                     self.tracks[tid]["kps"] = kp2ds_v[d2].detach()
+#                                     self.tracks[tid]["query"] = querys_v[d2].detach()
+#                                     self.tracks[tid]["prev_query_list"].append(querys_v[d2].detach())
+#                                     self.tracks[tid]["prev_query_list"] = self.tracks[tid]["prev_query_list"][:self.prev_query_num]
+
+#                                     self.tracks[tid]["age"] = 0
+#                                     self.tracks[tid]["query_idx"] = int(qidx_v[d2])
+
+#                                     used_tracks.add(t)
+#                                     matched_dets.add(d2)
+#                                     found = True
+#                                     break
+
+#                                 if not found:
+#                                     continue  
+#                             else:
+#                                 continue  
+
+#                         else:
+#                             tid = track_ids[t]
+#                             tracking_ids.append(tid)
+
+#                             self.tracks[tid]["prev_box"] = self.tracks[tid]["box"].clone()
+#                             self.tracks[tid]["prev_kps"] = self.tracks[tid]["kps"].clone()
+#                             self.tracks[tid]["prev_query_idx"] = self.tracks[tid]["query_idx"]
+#                             self.tracks[tid]["prev_query_list"].append(querys_v[d].detach())
+#                             self.tracks[tid]["prev_query_list"] = self.tracks[tid]["prev_query_list"][:self.prev_query_num]
+
+#                             # Original code:
+#                             # self.tracks[tid]["box"] = boxes_v[d].detach()
+                            
+#                             # Update Kalman Filter with measurement
+#                             if "kf" in self.tracks[tid]:
+#                                 meas = boxes_v_cxcywh[d]
+#                                 # new_xyxy = self.tracks[tid]["kf"].update(meas, is_occlusion=max_iou_curr>0.5)
+#                                 new_xyxy = self.tracks[tid]["kf"].update(meas)
+#                                 self.tracks[tid]["kf_box"] = new_xyxy.detach()
+#                             self.tracks[tid]["box"] = boxes_v[d].detach()
+                            
+#                             self.tracks[tid]["kps"] = kp2ds_v[d].detach()
+#                             self.tracks[tid]["query"] = querys_v[d].detach()
+#                             self.tracks[tid]["age"] = 0
+#                             self.tracks[tid]["query_idx"] = int(qidx_v[d])
+
+#                             used_tracks.add(t)
+#                             matched_dets.add(d)
+            
+#                 # Unmatched detections → candidates for new tracks (start with prev_box = box)
+#                 all_dets = set(range(boxes_v.size(0)))
+#                 unmatched = list(all_dets - matched_dets)
+
+#                 # hasattr(self, 'is_add_new'), self.is_add_new)
+#                 if len(unmatched) > 0 and (hasattr(self, 'is_add_new') and self.is_add_new):
+#                     um = torch.tensor(unmatched, device=boxes_v.device)
+
+#                     # prev_boxes = torch.stack(
+#                     #     [self.tracks[tid]["prev_box"] for tid in track_ids],
+#                     #     dim=0
+#                     # ) if len(track_ids) > 0 else boxes_xyxy_v.new_zeros((0,4))
+#                     # iou_mat = box_iou_xyxy(prev_boxes, boxes_v)
+
+#                     # # (A) Filter by max IoU vs *previous* boxes (as before)
+#                     # keep_mask_existing = []
+#                     # for d in um.tolist():
+#                     #     max_iou_prev = iou_mat[:, d].max().item() if iou_mat.numel() else 0.0
+#                     #     keep_mask_existing.append(
+#                     #         # Previous one
+#                     #         (max_iou_prev < self.iou_new_thresh) and (confs_v[d] >= self.conf_thresh+0.2)
+#                     #         # (max_iou_prev < self.iou_new_thresh) and (confs_v[d] >= self.conf_thresh+0.2)
+#                     #         # (max_iou_prev < self.iou_new_thresh) and (confs_v[d] >= self.conf_thresh+0.2)
+#                     #     )
+#                     # um = um[torch.tensor(keep_mask_existing, device=um.device, dtype=torch.bool)]
+
+#                     # (B) NEW: Filter by max IoU vs *current* boxes (after updates)
+#                     # This prevents spawning a new track that heavily overlaps an already-updated track box.
+#                     # print(1, um.shape)
+#                     if um.numel() > 0:
+#                         active_curr_ids = list(self.tracks.keys())
+#                         curr_boxes_stack = (
+#                             torch.stack([self.tracks[tid]["box"] for tid in active_curr_ids], dim=0)
+#                             if len(active_curr_ids) > 0 else boxes_v.new_zeros((0, 4))
+#                         )
+#                         keep_mask_current = []
+#                         for d in um.tolist():
+#                             if curr_boxes_stack.numel() == 0:
+#                                 keep_mask_current.append(True)
+#                                 continue
+#                             ious_curr = box_iou_xyxy(curr_boxes_stack, boxes_v[d].unsqueeze(0)).squeeze(1)  # (N,)
+#                             max_iou_curr = float(ious_curr.max().item()) if ious_curr.numel() > 0 else 0.0
+#                             keep_mask_current.append(max_iou_curr < self.iou_new_thresh and confs_v[d] >= self.conf_thresh+0.2)#*self.crowd)
+#                             # if max_iou_curr < self.iou_new_thresh and confs_v[d] >= self.conf_thresh+0.2:
+#                             #     print( max_iou_curr, confs_v[d], self.conf_thresh+0.2, self.iou_new_thresh)
+#                             # keep_mask_current.append(max_iou_curr < self.iou_new_thresh and confs_v[d] >= self.conf_thresh)
+
+#                         um = um[torch.tensor(keep_mask_current, device=um.device, dtype=torch.bool)]
+#                     # print(2, um.shape)
+
+#                     # if um.numel() > 0:
+#                     #     active_curr_ids = list(self.tracks.keys())
+#                     #     curr_boxes_stack = (
+#                     #         torch.stack([self.tracks[tid]["query"] for tid in active_curr_ids], dim=0)
+#                     #         if len(active_curr_ids) > 0 else querys_v.new_zeros((0, 768))
+#                     #     )
+#                     #     keep_mask_current = []
+#                     #     for d in um.tolist():
+#                     #         if curr_boxes_stack.numel() == 0:
+#                     #             keep_mask_current.append(True)
+#                     #             continue
+                            
+#                     #         cos_sim = F.cosine_similarity(
+#                     #             curr_boxes_stack.unsqueeze(1),  # [2,1,768]
+#                     #             querys_v[d].unsqueeze(0),      # [1,52,768]
+#                     #             dim=-1
+#                     #         )  # [2,52]
+
+#                     #         # ious_curr = box_iou_xyxy(curr_boxes_stack, querys_v[d].unsqueeze(0)).squeeze(1)  # (N,)
+#                     #         max_iou_curr = float(ious_curr.max().item()) if ious_curr.numel() > 0 else 0.0
+#                     #         keep_mask_current.append(max_iou_curr < self.iou_new_thresh and confs_v[d] >= self.conf_thresh+0.2)
+
+#                     #     um = um[torch.tensor(keep_mask_current, device=um.device, dtype=torch.bool)]
+
+#                     # (B2) ReID pass: try to attach unmatched dets to recently-unmatched tracks
+#                     if um.numel() > 0:
+#                         # choose candidate tracks for reid: small age (e.g., 1..reid_max_age) and not matched this frame
+#                         reid_max_age = getattr(self, "reid_max_age", 3)
+#                         iou_reid_thresh = getattr(self, "iou_reid_thresh", 0.3)  # looser than iou_match_thresh
+#                         cand_tids = [tid for tid in self.tracks
+#                                     # if 1 <= self.tracks[tid]["age"] <= reid_max_age ]
+#                                     if 0 <= self.tracks[tid]["age"] <= reid_max_age and tid not in used_tracks]
+
+#                         if len(cand_tids) > 0:
+#                             # Original code:
+#                             cand_prev = torch.stack([self.tracks[tid]["box"] for tid in cand_tids], dim=0)  # use last box or a predicted box
+#                             # # (선택) 칼만/상보필터 등으로 cand_prev를 예측 박스로 바꾸면 더 견고
+                            
+#                             # # Use Kalman Filter predicted boxes for ReID
+#                             # cand_pred_boxes = []
+#                             # for tid in cand_tids:
+#                             #     if "kf" in self.tracks[tid]:
+#                             #         # Already predicted in the main matching loop, but we need to get the predicted box
+#                             #         # If predict was called, we can use it again or store it
+#                             #         pred_xyxy = self.tracks[tid]["kf"].get_xyxy()
+#                             #         cand_pred_boxes.append(pred_xyxy.unsqueeze(0))
+#                             #     else:
+#                             #         cand_pred_boxes.append(self.tracks[tid]["box"].unsqueeze(0))
+#                             # cand_prev = torch.cat(cand_pred_boxes, dim=0) if cand_pred_boxes else boxes_v.new_zeros((0, 4))
+#                             det_boxes = boxes_v[um]  # unmatched dets
+
+#                             iou_reid = box_iou_xyxy(cand_prev, det_boxes)  # (Tc, Ud)
+#                             coords = torch.nonzero(iou_reid >= iou_reid_thresh, as_tuple=False)
+#                             if coords.numel() > 0:
+#                                 scores = iou_reid[coords[:,0], coords[:,1]]
+#                                 order = torch.argsort(scores, descending=True)
+#                                 used_cand, used_det = set(), set()
+#                                 newly_attached = []
+#                                 for k in order.tolist():
+#                                     ti = coords[k,0].item()
+#                                     di = coords[k,1].item()
+#                                     if ti in used_cand or di in used_det:
+#                                         continue
+#                                     tid = cand_tids[ti]
+#                                     d_global = um[di].item()
+#                                     tracking_ids.append(tid)
+
+#                                     # attach: mimic a normal match update
+#                                     self.tracks[tid]["prev_box"] = self.tracks[tid]["box"].clone()
+#                                     self.tracks[tid]["prev_kps"] = self.tracks[tid]["kps"].clone()
+#                                     self.tracks[tid]["prev_query_idx"] = self.tracks[tid]["query_idx"]
+#                                     self.tracks[tid]["prev_query_list"].append(querys_v[d_global].detach())
+#                                     self.tracks[tid]["prev_query_list"] = self.tracks[tid]["prev_query_list"][:self.prev_query_num]
+                                    
+#                                     # Original code:
+#                                     # self.tracks[tid]["box"] = boxes_v[d_global].detach()
+                                    
+#                                     # Update Kalman Filter with measurement
+#                                     if "kf" in self.tracks[tid]:
+#                                         meas = boxes_v_cxcywh[d_global]
+#                                         new_xyxy = self.tracks[tid]["kf"].update(meas)
+#                                         self.tracks[tid]["kf_box"] = new_xyxy.detach()
+#                                     self.tracks[tid]["box"] = boxes_v[d_global].detach()
+                                    
+#                                     self.tracks[tid]["kps"] = kp2ds_v[d_global].detach()
+#                                     self.tracks[tid]["query"] = querys_v[d_global].detach()
+#                                     self.tracks[tid]["age"] = 0
+#                                     self.tracks[tid]["query_idx"] = int(qidx_v[d_global])
+
+#                                     used_cand.add(ti)
+#                                     used_det.add(di)
+#                                     newly_attached.append(di)
+
+#                                 # remove attached dets from um
+#                                 if newly_attached:
+#                                     keep_mask = torch.ones(um.numel(), dtype=torch.bool, device=um.device)
+#                                     keep_mask[torch.tensor(newly_attached, device=um.device, dtype=torch.long)] = False
+#                                     um = um[keep_mask]
+
+#                     if um.numel() > 0:
+#                         # (C) Per-origin de-dup: keep the highest-confidence per origin_qidx
+#                         best_per_origin = {}
+#                         for d in um.tolist():
+#                             o = int(qidx_v[d])
+#                             if o not in best_per_origin or confs_v[d] > confs_v[best_per_origin[o]]:
+#                                 best_per_origin[o] = d
+#                         per_origin_idxs = torch.tensor(list(best_per_origin.values()), device=boxes_v.device)
+
+#                         # (D) NMS among remaining detections to collapse spatial duplicates
+#                         u_boxes = boxes_v[per_origin_idxs]
+#                         u_confs = confs_v[per_origin_idxs]
+#                         keep_nms = nms_xyxy(u_boxes, u_confs, iou_thresh=self.nms_threshold)
+#                         final_new = per_origin_idxs[keep_nms].tolist()
+
+#                         # (E) Avoid spawning a duplicate active track with the same origin
+#                         active_by_origin = {
+#                             self.tracks[tid]["origin_qidx"]: tid
+#                             for tid in self.tracks
+#                             if "origin_qidx" in self.tracks[tid]
+#                         }
+
+#                         for d in final_new:
+#                             org = int(qidx_v[d])
+#                             if org in active_by_origin:
+#                                 continue
+
+#                             tid_new = self.next_id
+#                             self.next_id += 1
+                            
+#                             # Original code:
+#                             # self.tracks[tid_new] = {
+#                             #     "box": boxes_v[d].detach(),
+#                             #     "prev_box": boxes_v[d].detach(),  # initialize prev=curr
+#                             #     "age": 0,
+#                             #     "query_idx": org,
+#                             #     "origin_qidx": org,
+#                             # }
+                            
+#                             # Initialize Kalman Filter for new track
+#                             init_box = boxes_v[d]
+#                             kf = TorchKalman(dt=self.dt, device=init_box.device)
+#                             kf.init_from_xyxy(init_box)
+                            
+#                             self.tracks[tid_new] = {
+#                                 "box": init_box.detach(),
+#                                 "prev_box": init_box.detach().clone(),  # initialize prev=curr
+#                                 "age": 0,
+#                                 "query_idx": org,
+#                                 "origin_qidx": org,
+#                                 "kf": kf,
+#                                 "kps": kp2ds_v[d].detach(),
+#                                 "query": querys_v[d].detach(),
+#                                 "prev_query_list": [querys_v[d].detach().clone()],
+#                             }
+#             # import pdb; pdb.set_trae()
+#         # if self.frame_id > 107:
+#         #     import numpy as np
+#         #     tdets = np.array(list(used_tracks))
+#         #     _track_ids = np.array(track_ids)
+#         #     # track_ids
+#         #     import pdb; pdb.set_trace()
+            
+
+#         # --- 3) Resolve track–track conflicts: within any IoU>=overlap_iou group keep only the most self-consistent track ---
+#         if self.is_add_new:
+#             active_ids = list(self.tracks.keys())
+#             if len(active_ids) >= 2:
+#                 cur_boxes = torch.stack([self.tracks[tid]["box"] for tid in active_ids], dim=0)
+#                 iou_tt = box_iou_xyxy(cur_boxes, cur_boxes)  # (N, N)
+#                 N = iou_tt.size(0)
+
+#                 # Connected components over edges (iou >= overlap_iou)
+#                 visited = [False] * N
+#                 groups = []
+#                 for i in range(N):
+#                     if visited[i]:
+#                         continue
+#                     stack = [i]
+#                     comp = []
+#                     visited[i] = True
+#                     while stack:
+#                         u = stack.pop()
+#                         comp.append(u)
+#                         nbrs = (iou_tt[u] >= overlap_iou).nonzero(as_tuple=False).flatten().tolist()
+#                         for v in nbrs:
+#                             if not visited[v]:
+#                                 visited[v] = True
+#                                 stack.append(v)
+#                     groups.append(comp)
+
+#                 # In each group, keep the track with max IoU(prev_box, curr_box); rollback others for this frame
+#                 for comp in groups:
+#                     if len(comp) <= 1:
+#                         continue
+
+#                     self_ious = []
+#                     for idx in comp:
+#                         tid = active_ids[idx]
+#                         curr = self.tracks[tid]["box"].unsqueeze(0)
+
+#                         prevb = self.tracks[tid].get("prev_box", None)
+#                         if prevb is None:
+#                             pb = prev_box.get(tid, None)
+#                             if pb is None:
+#                                 self_ious.append(-1.0)  # penalize if we cannot compute consistency
+#                                 continue
+#                             prevb = pb
+
+#                         prevb = prevb.unsqueeze(0)
+#                         val = box_iou_xyxy(prevb, curr)[0, 0].item()
+#                         self_ious.append(val)
+
+#                     winner_local_idx = int(torch.tensor(self_ious).argmax().item())
+#                     winner_tid = active_ids[comp[winner_local_idx]]
+
+#                     # Rollback losers to their pre-update state; age = prev_age + 1
+#                     for idx in comp:
+#                         tid = active_ids[idx]
+#                         if tid == winner_tid:
+#                             continue
+#                         if tid in prev_box:
+#                             self.tracks[tid]["box"] = prev_box[tid]
+#                         if tid in prev_qid:
+#                             self.tracks[tid]["query_idx"] = prev_qid[tid]
+#                         self.tracks[tid]["age"] = prev_age.get(tid, self.tracks[tid]["age"]) + 1
+
+#         # --- 4) Drop stale tracks ---
+#         for tid in list(self.tracks.keys()):
+#             if self.tracks[tid]["age"] > self.max_age:
+#                 del self.tracks[tid]
+
+#         # --- 5) Return active matched ids and index maps (age == 0 means matched this frame) ---
+#         active_matched_ids = [tid for tid in self.tracks.keys() if self.tracks[tid]["age"] == 0]
+#         id2qidx = {tid: self.tracks[tid]["query_idx"] for tid in active_matched_ids}
+#         id2origin = {
+#             tid: self.tracks[tid].get("origin_qidx", self.tracks[tid]["query_idx"])
+#             for tid in active_matched_ids
+#         }
+#         self.active_ids = active_matched_ids
+#         # print(self.active_ids, self.next_id)
+#         return active_matched_ids, id2qidx, id2origin
 
 # class QueryTracker:
 #     def __init__(self,

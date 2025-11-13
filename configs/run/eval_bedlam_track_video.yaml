@@ -17,7 +17,7 @@ eval_batch_size: 1
 eval_num_workers: 10
 distributed_eval: True
 
-iou_match_thresh: 0.3
+iou_match_thresh: 0.1
 iou_new_thresh: 0.5
 is_add_new: True
 is_size_filter: False
@@ -37,3 +37,4 @@ video_stride: 8
 # max_age: 5
 
 total_gpus: 1
+memory_update_type: 'sim'

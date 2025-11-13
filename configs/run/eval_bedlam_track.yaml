@@ -2,11 +2,11 @@ model: default
 
 pretrain: True
 # pretrain_path: './weights/sat_hmr/sat_644_3dpw.pth'
-# pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_all_sat_pr_sam2_test/epoch_1_step_23685/pytorch_model.bin'
-pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server/pytorch_model.bin'
+pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_all_sat_pr_sam2_test/epoch_1_step_23685/pytorch_model.bin'
+# pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server/pytorch_model.bin'
 
 input_dir: './data/datasets/bedlam/train_images/20221019_3-8_250_highbmihand_orbit_stadium_6fps/png'
-output_dir: './tracking_results/bedlam'
+output_dir: './tracking_results/bedlam_img'
 
 eval_datasets_used: ['3dpw']
 eval_datasets_split: ['test']
@@ -22,7 +22,7 @@ iou_new_thresh: 0.5
 is_add_new: True
 is_size_filter: False
 nms_threshold: 0.7
-pr_conf_thresh: 0.5
+pr_conf_thresh: 0.9
 max_age: 5
 
 total_gpus: 1

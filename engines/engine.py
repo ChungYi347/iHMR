@@ -27,6 +27,8 @@ from utils.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
 from datasets.pw3d import PW3D
 from datasets.bedlam import BEDLAM
 
+import json
+
 import wandb
 
 import shutil
@@ -359,12 +361,12 @@ class Engine():
                         if not misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, args.lr_prompt_names)],
                     "lr": args.lr,
                 },
-                {
-                    "params": 
-                        [p for n, p in self.unwrapped_model.named_parameters() 
-                        if misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, args.lr_prompt_names)],
-                    "lr": args.lr_encoder,
-                },
+                # {
+                #     "params": 
+                #         [p for n, p in self.unwrapped_model.named_parameters() 
+                #         if misc.match_name_keywords(n, args.lr_encoder_names) and p.requires_grad and not misc.match_name_keywords(n, args.lr_prompt_names)],
+                #     "lr": args.lr_encoder,
+                # },
                 {
                     "params": 
                         [p for n, p in self.unwrapped_model.named_parameters() 
@@ -683,8 +685,8 @@ class Engine():
 
             ckpts_root = Path(self.output_dir) / "ckpts" / self.exp_name
             self._update_symlink(ckpts_root / "last_epoch", ckpts_save_path)
-            if epoch % self.save_and_eval_epoch == 0:
-                self._cleanup_keep_multiples_of_5(ckpts_root, keep_epoch=epoch)
+            # if epoch % self.save_and_eval_epoch == 0:
+            #     self._cleanup_keep_multiples_of_5(ckpts_root, keep_epoch=epoch)
 
         self.accelerator.wait_for_everyone()
         
@@ -739,12 +741,13 @@ class Engine():
         # target_folders = ['024165_mpii_test', '015301_mpii_test', '016180_mpii_test',
         #                     '014140_mpii_test', '022691_mpii_test',
         #                     '002364_mpii_test']
-        target_folders = ['008827_mpii_test', '002835_mpii_test', '001486_mpii_test', '012834_mpii_test',
-                            '016236_mpii_test', '007934_mpii_test', '024159_mpii_test', '024158_mpii_test',
-                            '015860_mpii_test', '007934_mpii_test', '007793_mpii_test', '008827_mpii_test',
-                            '012834_mpii_test', '011648_mpii_test']
+        # target_folders = ['008827_mpii_test', '002835_mpii_test', '001486_mpii_test', '012834_mpii_test',
+        #                     '016236_mpii_test', '007934_mpii_test', '024159_mpii_test', '024158_mpii_test',
+        #                     '015860_mpii_test', '007934_mpii_test', '007793_mpii_test', '008827_mpii_test',
+        #                     '012834_mpii_test', '011648_mpii_test']
+        # target_folders = ['000707_mpii_test']
         
-        folder_list = [f for f in folder_list if any(target in f for target in target_folders)]
+        # folder_list = [f for f in folder_list if any(target in f for target in target_folders)]
         # print(args.total_gpus)
         # folder_list = folder_list[96:]
 
@@ -758,6 +761,32 @@ class Engine():
 
         for i, img_folder in enumerate(assigned_folders):
             self.accelerator.print(f"[Rank {rank}] [{i+1}/{len(assigned_folders)}] {img_folder}")
+
+            if hasattr(args, 'is_gt') and args.is_gt:
+                tracking_gt_path = img_folder.replace('images', 'posetrack_data')+'.json'
+                tracking_gt_path = tracking_gt_path.replace('Posetrack/', 'PoseTrack21/').replace('PoseTrack2018/', 'PoseTrack21/')
+
+                anns = json.load(open(tracking_gt_path))
+                images_ids = [i['image_id'] for i in  anns['images']]
+                dic = {img_id:[[],[]] for img_id in images_ids}
+
+                for ann in anns['annotations']:
+                    dic[ann['image_id']][0].append(ann['track_id'])
+                    dic[ann['image_id']][1].append(ann['bbox'])
+
+                init_bboxes = []
+                prev_ids = []
+                prev_value = None
+                for i, (k, v) in enumerate(dic.items()):
+                    if v[0] == []:
+                        continue
+                    current_value = v[0]
+                    not_in_b = list(set(current_value) - set(prev_ids))
+                    prev_ids.extend(current_value)
+                    prev_ids = list(set(prev_ids))
+
+                    for idx in not_in_b:
+                        init_bboxes.append([i, idx, v[1][v[0].index(idx)]])
 
             if hasattr(self, "tracker"):
                 self.tracker.reset()
@@ -800,14 +829,24 @@ class Engine():
             self.accelerator.print('Using following threshold(s): ', self.conf_thresh)
             img_folder = infer_loader.dataset.dataset_path.split('/')[-1]
             for thresh in self.conf_thresh:
-                eval_posetrack(model = unwrapped_model, 
-                        infer_dataloader = infer_loader, 
-                        conf_thresh = thresh,
-                        results_save_path = os.path.join(results_save_path,f'{img_folder}'),
-                        distributed = self.distributed_infer,
-                        accelerator = self.accelerator,
-                        args = self.args)
-                # self.accelerator.wait_for_everyone()
+                if not args.is_gt:
+                    eval_posetrack(model = unwrapped_model, 
+                            infer_dataloader = infer_loader, 
+                            conf_thresh = thresh,
+                            results_save_path = os.path.join(results_save_path,f'{img_folder}'),
+                            distributed = self.distributed_infer,
+                            accelerator = self.accelerator,
+                            args = self.args)
+                    # self.accelerator.wait_for_everyone()
+                else:
+                    eval_posetrack(model = unwrapped_model, 
+                            infer_dataloader = infer_loader, 
+                            conf_thresh = thresh,
+                            results_save_path = os.path.join(results_save_path,f'{img_folder}'),
+                            distributed = self.distributed_infer,
+                            accelerator = self.accelerator,
+                            args = self.args,
+                            init_bboxes=init_bboxes)
 
     def eval_3dpw_track(self, args):
         self.model.eval()
@@ -923,8 +962,8 @@ class Engine():
         # # target_folders = ['000809_mpii_test']
         # # # target_folders = ['004622_mpii_test', '015241_mpii_test']
         # # # target_folders = ['009470_mpii_test']
-        # target_folders = ['20221019_3-8_250_highbmihand_orbit_stadium_6fps']
-        target_folders = ['20221019_3-8_250_highbmihand_orbit_stadium_6fps/png/seq_000004']
+        target_folders = ['20221019_3-8_250_highbmihand_orbit_stadium_6fps']
+        # target_folders = ['20221019_3-8_250_highbmihand_orbit_stadium_6fps/png/seq_000004']
         folder_list = [f for f in folder_list if any(target in f for target in target_folders)]
         # print(args.total_gpus)
 

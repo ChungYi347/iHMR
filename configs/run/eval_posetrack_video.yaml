@@ -7,17 +7,21 @@ pretrain: True
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_all_sat_pr_sam2/epoch_13_step_20705/pytorch_model.bin'
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server/pytorch_model.bin'
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_all_sat_pr_sam2_test/epoch_1_step_23685/pytorch_model.bin'
-pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_all_sat_pr_sam2/epoch_4_step_26334/pytorch_model.bin'
+# pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_sim/pytorch_model.bin'
+# pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_10/pytorch_model.bin'
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_noise_num/pytorch_model.bin'
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_noise/pytorch_model.bin'
+pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_sim/pytorch_model.bin'
 
 input_dir: './data/datasets/Posetrack/PoseTrack2018/images/val'
-output_dir: './tracking_results/baseline_trn_new'
-# conf_thresh: [0.15]
+output_dir: './tracking_results/baseline_trn_new_video'
 conf_thresh: [0.15]
+# conf_thresh: [0.2]
 infer_batch_size: 1
 infer_num_workers: 3
 distributed_infer: True
+
+is_gt: False
 
 # iou_match_thresh: 0.5
 # iou_new_thresh: 0.5
@@ -34,6 +38,7 @@ is_add_new: True
 is_size_filter: True
 nms_threshold: 0.7
 pr_conf_thresh: 0.9
+memory_update_type: 'sim'
 
 video_model: True
 video_stride: 8
