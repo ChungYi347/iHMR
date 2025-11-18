@@ -348,7 +348,7 @@ def eval_posetrack(model, infer_dataloader, conf_thresh, results_save_path = Non
     model.query_bank = []
     if hasattr(model, 'module'):
         model.module.query_bank = []
-        
+
     detect_conf = 0.3
     times = []
     prev_frame = None
@@ -600,22 +600,22 @@ def eval_posetrack(model, infer_dataloader, conf_thresh, results_save_path = Non
 
             #     # pred_mesh_img = vis_boxes(pred_mesh_img, pred_boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
             #     # pred_mesh_img = vis_boxes(pred_mesh_img, _pred_boxes, color = (0,0,255))[:img_size[0],:img_size[1]]
-            #     for box_idx, tid in enumerate(outputs['active_ids']):
-            #     # for box_idx, tid in enumerate(range(len(pred_verts[0][:15]))):
-            #         x1, y1, x2, y2 = pred_boxes[box_idx].int().tolist()
-            #         # kfx1, kfy1, kfx2, kfy2 = model.tracker.tracks[tid]['kf'].get_xyxy().tolist()
-            #         cv2.rectangle(pred_mesh_img, (x1, y1), (x2, y2), (255, 0, 255), 2)
-            #         # cv2.rectangle(pred_mesh_img, (int(kfx1), int(kfy1)), (int(kfx2), int(kfy2)), (0, 255, 0), 4)
-            #         cv2.putText(
-            #             pred_mesh_img,
-            #             f"{tid}",
-            #             (x1, y1 - 5),
-            #             cv2.FONT_HERSHEY_SIMPLEX,
-            #             0.8,
-            #             (255, 0, 255),
-            #             2,
-            #             cv2.LINE_AA
-            #         )
+            #     # for box_idx, tid in enumerate(outputs['active_ids']):
+            #     # # for box_idx, tid in enumerate(range(len(pred_verts[0][:15]))):
+            #     #     x1, y1, x2, y2 = pred_boxes[box_idx].int().tolist()
+            #     #     # kfx1, kfy1, kfx2, kfy2 = model.tracker.tracks[tid]['kf'].get_xyxy().tolist()
+            #     #     cv2.rectangle(pred_mesh_img, (x1, y1), (x2, y2), (255, 0, 255), 2)
+            #     #     # cv2.rectangle(pred_mesh_img, (int(kfx1), int(kfy1)), (int(kfx2), int(kfy2)), (0, 255, 0), 4)
+            #     #     cv2.putText(
+            #     #         pred_mesh_img,
+            #     #         f"{tid}",
+            #     #         (x1, y1 - 5),
+            #     #         cv2.FONT_HERSHEY_SIMPLEX,
+            #     #         0.8,
+            #     #         (255, 0, 255),
+            #     #         2,
+            #     #         cv2.LINE_AA
+            #     #     )
             #     # pred_mesh_img = vis_boxes(pred_mesh_img, pred_boxes, color = (255,0,255))[:img_size[0],:img_size[1]]
 
             #     # # select_queries_idx = torch.where(outputs['pred_confs'][idx] > conf_thresh)[0]
@@ -1146,7 +1146,7 @@ def shrink_and_expand(bboxes_cxcywh: torch.Tensor, shrink_from=0.1, expand_to=0.
 
 
 def eval_bedlam_track(model, infer_dataloader, conf_thresh, results_save_path = None,
-                        distributed = False, accelerator = None, args=None):
+                        distributed = False, accelerator = None, args=None, init_bboxes=None):
     assert results_save_path is not None
     assert accelerator is not None
 
@@ -1188,13 +1188,46 @@ def eval_bedlam_track(model, infer_dataloader, conf_thresh, results_save_path = 
     for itr, (samples, targets) in enumerate(infer_dataloader):
         model.tracker.frame_id = itr
         model.img_seq_idx = itr
-        samples=[sample.to(device = cur_device, non_blocking = True) for sample in samples]
-        with torch.no_grad():    
-            start_time = time.time()
-            outputs = model(samples, targets)
-            end_time = time.time()
-        elapsed = end_time - start_time
-        times.append(elapsed)
+
+        if hasattr(args, 'is_trkquery') and not args.is_trkquery:
+            targets[0]['is_trkquery'] = args.is_trkquery
+
+        if hasattr(model, 'module'):
+            model.img_seq_idx = itr
+        if model.__class__.__name__ == "ImageModel":
+            samples=[sample.to(device = cur_device, non_blocking = True) for sample in samples]
+            with torch.no_grad():    
+                start_time = time.time()
+                outputs = model(samples, targets)
+                end_time = time.time()
+            elapsed = end_time - start_time
+            times.append(elapsed)
+        else:
+            samples=[sample.to(device = cur_device, non_blocking = True) for sample in samples]
+            targets[0]['is_gt'] = hasattr(args, 'is_gt') and args.is_gt
+
+            if init_bboxes is not None:
+                boxes_for_itr = torch.tensor([box for fidx, _, box in init_bboxes if fidx == itr])
+                if len(boxes_for_itr) != 0:
+                    ori_img_w, ori_img_h = targets[0]['ori_img_size'][1], targets[0]['ori_img_size'][0]
+                    img_w, img_h = targets[0]['img_size'][1], targets[0]['img_size'][0]
+
+                    boxes_for_itr[:, 2] = boxes_for_itr[:, 2] + boxes_for_itr[:, 0]
+                    boxes_for_itr[:, 3] = boxes_for_itr[:, 3] + boxes_for_itr[:, 1]
+                    boxes_for_itr = boxes_for_itr / torch.tensor([ori_img_w, ori_img_h, ori_img_w, ori_img_h]) * torch.tensor([img_w, img_h, img_w, img_h])
+
+                    _boxes_for_itr = boxes_for_itr.clone()
+                    targets[0]['init_boxes'] = boxes_for_itr
+                    with torch.no_grad():    
+                        outputs = model(samples, targets)
+                    del targets[0]['init_boxes']
+
+            with torch.no_grad():    
+                start_time = time.time()
+                outputs = model(samples, targets)
+                end_time = time.time()
+            elapsed = end_time - start_time
+            times.append(elapsed)
 
         bs = len(targets)
         for idx in range(bs):

@@ -1553,9 +1553,9 @@ class ImageModel(nn.Module):
                     gt_boxes[:, 1] = gt_boxes[:, 1] * self.input_size
                     gt_boxes[:, 2] = gt_boxes[:, 2] * self.input_size
                     gt_boxes[:, 3] = gt_boxes[:, 3] * self.input_size
-                    active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=querys, gt_boxes=gt_boxes)
+                    active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=querys, ori_querys=querys, gt_boxes=gt_boxes)
                 else:
-                    active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=querys)
+                    active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=querys, ori_querys=querys)
 
                 if len(id2qidx) == 0:
                     keep_indices = torch.empty((0,), dtype=torch.long, device=boxes.device)

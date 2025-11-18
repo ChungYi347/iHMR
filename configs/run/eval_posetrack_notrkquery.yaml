@@ -6,13 +6,13 @@ pretrain: True
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_all/epoch_13_step_31569/pytorch_model.bin'
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_all_sat_pr_sam2/epoch_13_step_20705/pytorch_model.bin'
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server/pytorch_model.bin'
-pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_all_sat_pr_sam2_test/epoch_1_step_23685/pytorch_model.bin'
-# pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_10/pytorch_model.bin'
+# pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_all_sat_pr_sam2_test/epoch_1_step_23685/pytorch_model.bin'
+pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_10/pytorch_model.bin'
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_noise_num/pytorch_model.bin'
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_noise/pytorch_model.bin'
 
 input_dir: './data/datasets/Posetrack/PoseTrack2018/images/val'
-output_dir: './tracking_results/baseline_trn_new_video_notrkquery'
+output_dir: './tracking_results/baseline_trn_new_img_notrkquery_10'
 # conf_thresh: [0.15]
 conf_thresh: [0.15]
 infer_batch_size: 1

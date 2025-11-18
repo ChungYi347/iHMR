@@ -198,7 +198,9 @@ class QueryTracker:
                  is_add_new=True,
                  is_size_filter=True,
                  nms_threshold=0.7,
-                 dt=1.0):
+                 dt=1.0,
+                 iou_type="iou",
+                 prev_query_num=3,):
         self.conf_thresh = conf_thresh
         self.iou_match_thresh = iou_match_thresh
         self.iou_new_thresh = iou_new_thresh
@@ -213,7 +215,8 @@ class QueryTracker:
 
         self.next_id = 0
         self.tracks = {}
-        self.prev_query_num = 3
+        self.prev_query_num = prev_query_num
+        self.iou_type = iou_type
 
     def reset(self):
         self.next_id = 0
@@ -244,6 +247,7 @@ class QueryTracker:
         query_indices  = query_indices[valid]
         kps = kps[valid]
         querys = querys[valid]
+        ori_querys = ori_querys[valid]
 
         keep = nms_xyxy(boxes_xyxy, confs, iou_thresh=nms_iou)
         if keep.numel() == 0:
@@ -254,6 +258,7 @@ class QueryTracker:
         keep_qidx  = query_indices[keep]
         keep_kps = kps[keep]
         keep_query = querys[keep]
+        keep_ori_query = ori_querys[keep]
 
         if gt_boxes is not None:
             gt = gt_boxes.to(keep_boxes.device).float()  # [N, 4]
@@ -278,10 +283,11 @@ class QueryTracker:
             keep_qidx = keep_qidx[best_gt_idx]
             keep_kps = keep_kps[best_gt_idx]
             keep_query = keep_query[best_gt_idx]
+            keep_ori_query = keep_ori_query[best_gt_idx]
 
         active_ids = []
         device = keep_boxes.device
-        for b, c, q, k, query in zip(keep_boxes, keep_confs, keep_qidx, keep_kps, keep_query):
+        for b, c, q, k, query, ori_query in zip(keep_boxes, keep_confs, keep_qidx, keep_kps, keep_query, keep_ori_query):
             if c < self.conf_thresh:
                 continue
             tid = self.next_id
@@ -308,6 +314,7 @@ class QueryTracker:
                 "origin_qidx": int(q),
                 "kps": k.detach(),
                 "query": query.detach(),
+                "ori_query": ori_query.detach(),
                 "kf": kf,
             }
             active_ids.append(tid)
@@ -326,7 +333,7 @@ class QueryTracker:
         # valid = confs > self.conf_thresh 
         active_ids = []
         device = boxes.device
-        for b, c, q, k, query in zip(boxes_xyxy, confs, query_indices, kps, querys):
+        for b, c, q, k, query, ori_query in zip(boxes_xyxy, confs, query_indices, kps, querys, ori_querys):
             # if c < self.conf_thresh:
             #     continue
             tid = self.next_id
@@ -352,8 +359,10 @@ class QueryTracker:
                 "origin_qidx": int(q),
                 "kps": k.detach(),
                 "query": query.detach(),
+                "ori_query": ori_query.detach(),
                 "kf": kf,
                 "prev_query_list": [query.detach().clone()],
+                "prev_ori_query_list": [ori_query.detach().clone()],
             }
             active_ids.append(tid)
             self.next_id += 1
@@ -382,6 +391,7 @@ class QueryTracker:
             prev_qid[tid] = self.tracks[tid]["query_idx"]
             prev_qid[tid] = self.tracks[tid]["kps"]
             prev_qid[tid] = self.tracks[tid]["query"]
+            prev_qid[tid] = self.tracks[tid]["ori_query"]
             # default +1; will reset to 0 if matched
             self.tracks[tid]["age"] += 1
 
@@ -406,9 +416,9 @@ class QueryTracker:
             pr_valid = confs >= self.pr_conf_thresh
             pr_valid[len(active_matched_ids):] = False
 
-        # print(confs[:len(active_matched_ids)])
 
         valid = pr_valid | valid
+        # print(confs[:len(active_matched_ids)], confs[valid])
         # print(active_matched_ids, valid)
         # valid = confs >= self.conf_thresh
         # boxes_v_xyxy   = boxes_xyxy[valid]
@@ -433,6 +443,8 @@ class QueryTracker:
         kp2ds_v = kp2ds[valid]
         querys = querys[0]
         querys_v = querys[valid]
+        ori_querys = ori_querys[0]
+        ori_querys_v = ori_querys[valid]
 
         # posetrack: 0.7
         # 3dpw: 0.99
@@ -452,12 +464,13 @@ class QueryTracker:
             qidx_v = qidx_v[keep_nms]
             kp2ds_v = kp2ds_v[keep_nms]
             querys_v = querys_v[keep_nms]
+            ori_querys_v = ori_querys_v[keep_nms]
 
         # --- 2) If no tracks yet, initialize from current frame ---
         if len(self.tracks) == 0:
             # _ = self.init_frame(boxes_v, confs_v, qidx_v, kps=kp2ds_v, gt_boxes=gt_boxes, querys=querys_v, nms_iou=0.3)
             # posetrack
-            _ = self.init_frame(boxes_v, confs_v, qidx_v, kps=kp2ds_v, gt_boxes=gt_boxes, querys=querys_v, nms_iou=0.7)
+            _ = self.init_frame(boxes_v, confs_v, qidx_v, kps=kp2ds_v, gt_boxes=gt_boxes, querys=querys_v, ori_querys=ori_querys_v, nms_iou=0.7)
             # Ensure new tracks start with prev_box = box
             for tid in self.tracks:
                 if "prev_box" not in self.tracks[tid]:
@@ -467,6 +480,9 @@ class QueryTracker:
                 if "prev_query" not in self.tracks[tid]:
                     self.tracks[tid]["prev_query"] = self.tracks[tid]["query"].clone()
                     self.tracks[tid]["prev_query_list"] = [self.tracks[tid]["query"].clone()]
+                if "prev_ori_query" not in self.tracks[tid]:
+                    self.tracks[tid]["prev_ori_query"] = self.tracks[tid]["ori_query"].clone()
+                    self.tracks[tid]["prev_ori_query_list"] = [self.tracks[tid]["ori_query"].clone()]
 
         else:
             track_ids = list(self.tracks.keys())
@@ -494,11 +510,13 @@ class QueryTracker:
                 prev_querys_stack = torch.stack([self.tracks[tid]["query"] for tid in track_ids], dim=0)
                 # prev_querys_stack = torch.stack([torch.mean(torch.stack(self.tracks[tid]["prev_query_list"]), 0) for tid in track_ids], dim=0)
 
-                cos_sim = F.cosine_similarity(
-                    prev_querys_stack.unsqueeze(1),  # [2,1,768]
-                    querys_v.unsqueeze(0),      # [1,52,768]
-                    dim=-1
-                )  # [2,52]
+                if self.iou_type == "query":
+                    cos_sim = F.cosine_similarity(
+                        prev_querys_stack.unsqueeze(1),  # [2,1,768]
+                        querys_v.unsqueeze(0),      # [1,52,768]
+                        dim=-1
+                    )  # [2,52]
+                    iou_mat = iou_mat * 0.1 + cos_sim * 0.9
 
 
                 # prev_keypoints = torch.stack([self.tracks[tid]["kps"] for tid in track_ids], dim=0)
@@ -513,7 +531,6 @@ class QueryTracker:
                 # iou_mat = iou_mat * 0.5 + cos_sim * 0.5
                 # iou_mat = cos_sim 
                 # iou_mat = iou_mat
-                iou_mat = iou_mat * 0.1 + cos_sim * 0.9
                 # iou_mat = iou_mat # * 0.1 + cos_sim * 0.9
                 # iou_mat = iou_mat * 0.1 + oks_matrix * 0.6 + cos_sim * 0.3
 
@@ -597,6 +614,9 @@ class QueryTracker:
                         self.tracks[tid]["prev_query_list"].append(querys_v[d].detach())
                         self.tracks[tid]["prev_query_list"] = self.tracks[tid]["prev_query_list"][:self.prev_query_num]
 
+                        self.tracks[tid]["prev_ori_query_list"].append(ori_querys_v[d].detach())
+                        self.tracks[tid]["prev_ori_query_list"] = self.tracks[tid]["prev_ori_query_list"][:self.prev_query_num]
+
                         # Original code:
                         # self.tracks[tid]["box"] = boxes_v[d].detach()
                         
@@ -610,6 +630,7 @@ class QueryTracker:
                         
                         self.tracks[tid]["kps"] = kp2ds_v[d].detach()
                         self.tracks[tid]["query"] = querys_v[d].detach()
+                        self.tracks[tid]["ori_query"] = ori_querys_v[d].detach()
                         self.tracks[tid]["age"] = 0
                         self.tracks[tid]["query_idx"] = int(qidx_v[d])
 
@@ -740,6 +761,8 @@ class QueryTracker:
                                     self.tracks[tid]["prev_query_list"].append(querys_v[d_global].detach())
                                     self.tracks[tid]["prev_query_list"] = self.tracks[tid]["prev_query_list"][:self.prev_query_num]
                                     
+                                    self.tracks[tid]["prev_ori_query_list"].append(ori_querys_v[d_global].detach())
+                                    self.tracks[tid]["prev_ori_query_list"] = self.tracks[tid]["prev_ori_query_list"][:self.prev_query_num]
                                     # Original code:
                                     # self.tracks[tid]["box"] = boxes_v[d_global].detach()
                                     
@@ -753,6 +776,7 @@ class QueryTracker:
                                     
                                     self.tracks[tid]["kps"] = kp2ds_v[d_global].detach()
                                     self.tracks[tid]["query"] = querys_v[d_global].detach()
+                                    self.tracks[tid]["ori_query"] = ori_querys_v[d_global].detach()
                                     self.tracks[tid]["age"] = 0
                                     self.tracks[tid]["query_idx"] = int(qidx_v[d_global])
 
@@ -820,6 +844,8 @@ class QueryTracker:
                                 "kps": kp2ds_v[d].detach(),
                                 "query": querys_v[d].detach(),
                                 "prev_query_list": [querys_v[d].detach().clone()],
+                                "ori_query": ori_querys_v[d].detach(),
+                                "prev_ori_query_list": [ori_querys_v[d].detach().clone()],
                             }
             # import pdb; pdb.set_trae()
         # if self.frame_id > 107:

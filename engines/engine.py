@@ -745,7 +745,7 @@ class Engine():
         #                     '016236_mpii_test', '007934_mpii_test', '024159_mpii_test', '024158_mpii_test',
         #                     '015860_mpii_test', '007934_mpii_test', '007793_mpii_test', '008827_mpii_test',
         #                     '012834_mpii_test', '011648_mpii_test']
-        # target_folders = ['000707_mpii_test']
+        # target_folders = ['007934_mpii_test']
         
         # folder_list = [f for f in folder_list if any(target in f for target in target_folders)]
         # print(args.total_gpus)
@@ -820,7 +820,7 @@ class Engine():
             self.unwrapped_model.tracker = QueryTracker(self.args.conf_thresh[0], self.args.iou_match_thresh, 
                 self.args.iou_new_thresh, self.args.max_age, boxes_format, is_add_new=self.args.is_add_new,
                 is_size_filter=self.args.is_size_filter, nms_threshold=self.args.nms_threshold,
-                pr_conf_thresh=self.args.pr_conf_thresh)
+                pr_conf_thresh=self.args.pr_conf_thresh, prev_query_num=self.args.prev_query_num, iou_type=self.args.iou_type)
             
             results_save_path = self.output_dir
             if self.accelerator.is_main_process:
@@ -964,6 +964,7 @@ class Engine():
         # # # target_folders = ['009470_mpii_test']
         target_folders = ['20221019_3-8_250_highbmihand_orbit_stadium_6fps']
         # target_folders = ['20221019_3-8_250_highbmihand_orbit_stadium_6fps/png/seq_000004']
+        # target_folders = ['20221019_3-8_250_highbmihand_orbit_stadium_6fps/png/seq_000002']
         folder_list = [f for f in folder_list if any(target in f for target in target_folders)]
         # print(args.total_gpus)
 
@@ -977,6 +978,40 @@ class Engine():
 
         for i, img_folder in enumerate(assigned_folders):
             self.accelerator.print(f"[Rank {rank}] [{i+1}/{len(assigned_folders)}] {img_folder}")
+
+            if hasattr(args, 'is_gt') and args.is_gt:
+                data_gt = np.load('evaluations/bedlam_tracking_gts.npz', allow_pickle=True)['annots'][()] 
+                folder_name = img_folder.split('/')[-1]
+                
+                images_ids = [i for i in  data_gt[folder_name]]
+                dic = {img_id:[[],[]] for img_id in images_ids}
+                for img_idx in images_ids:
+                    dic[img_idx][0] = data_gt[folder_name][img_idx][1]
+                    dic[img_idx][1] = data_gt[folder_name][img_idx][2]
+                # tracking_gt_path = img_folder.replace('images', 'posetrack_data')+'.json'
+                # tracking_gt_path = tracking_gt_path.replace('Posetrack/', 'PoseTrack21/').replace('PoseTrack2018/', 'PoseTrack21/')
+
+                # anns = json.load(open(tracking_gt_path))
+                # images_ids = [i['image_id'] for i in  anns['images']]
+                # dic = {img_id:[[],[]] for img_id in images_ids}
+
+                # for ann in anns['annotations']:
+                #     dic[ann['image_id']][0].append(ann['track_id'])
+                #     dic[ann['image_id']][1].append(ann['bbox'])
+
+                init_bboxes = []
+                prev_ids = []
+                prev_value = None
+                for i, (k, v) in enumerate(dic.items()):
+                    if v[0] == []:
+                        continue
+                    current_value = v[0]
+                    not_in_b = list(set(current_value) - set(prev_ids))
+                    prev_ids.extend(current_value)
+                    prev_ids = list(set(prev_ids))
+
+                    for idx in not_in_b:
+                        init_bboxes.append([i, idx, v[1][v[0].index(idx)]])
 
             if hasattr(self, "tracker"):
                 self.tracker.reset()
@@ -1021,7 +1056,7 @@ class Engine():
             self.unwrapped_model.tracker = QueryTracker(self.args.conf_thresh[0], self.args.iou_match_thresh, self.args.iou_new_thresh, 
                 self.args.max_age, boxes_format, is_add_new=self.args.is_add_new,
                 is_size_filter=self.args.is_size_filter, nms_threshold=self.args.nms_threshold,
-                pr_conf_thresh=self.args.pr_conf_thresh)
+                pr_conf_thresh=self.args.pr_conf_thresh, prev_query_num=self.args.prev_query_num, iou_type=self.args.iou_type)
             
             results_save_path = self.output_dir
             if self.accelerator.is_main_process:
@@ -1030,13 +1065,23 @@ class Engine():
             self.accelerator.print('Using following threshold(s): ', self.conf_thresh)
             img_folder = infer_loader.dataset.target_folders.split('/')[-1]
             for thresh in self.conf_thresh:
-                eval_bedlam_track(model = unwrapped_model, 
-                        infer_dataloader = infer_loader, 
-                        conf_thresh = thresh,
-                        results_save_path = os.path.join(results_save_path,f'{img_folder}'),
-                        distributed = self.distributed_infer,
-                        accelerator = self.accelerator,
-                        args = self.args)
+                if not args.is_gt:
+                    eval_bedlam_track(model = unwrapped_model, 
+                            infer_dataloader = infer_loader, 
+                            conf_thresh = thresh,
+                            results_save_path = os.path.join(results_save_path,f'{img_folder}'),
+                            distributed = self.distributed_infer,
+                            accelerator = self.accelerator,
+                            args = self.args)
+                else:
+                    eval_bedlam_track(model = unwrapped_model, 
+                            infer_dataloader = infer_loader, 
+                            conf_thresh = thresh,
+                            results_save_path = os.path.join(results_save_path,f'{img_folder}'),
+                            distributed = self.distributed_infer,
+                            accelerator = self.accelerator,
+                            args = self.args,
+                            init_bboxes=init_bboxes)
                 # self.accelerator.wait_for_everyone()
 
     def eval_posetrack_video(self, args):
@@ -1114,7 +1159,7 @@ class Engine():
             self.unwrapped_model.tracker = QueryTracker(self.args.conf_thresh[0], self.args.iou_match_thresh, 
                 self.args.iou_new_thresh, self.args.max_age, boxes_format, is_add_new=self.args.is_add_new,
                 is_size_filter=self.args.is_size_filter, nms_threshold=self.args.nms_threshold,
-                pr_conf_thresh=self.args.pr_conf_thresh)
+                pr_conf_thresh=self.args.pr_conf_thresh, prev_query_num=self.args.prev_query_num, iou_type=self.args.iou_type)
             
             results_save_path = self.output_dir
             if self.accelerator.is_main_process:

@@ -5,10 +5,10 @@ pretrain: True
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_10/pytorch_model.bin'
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server/pytorch_model.bin'
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_all_sat_pr_sam2/epoch_4_step_26334/pytorch_model.bin'
-pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_early_4/pytorch_model.bin'
+pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_late_8/pytorch_model.bin'
 
 input_dir: './data/datasets/bedlam/train_images/20221019_3-8_250_highbmihand_orbit_stadium_6fps/png'
-output_dir: './tracking_results/bedlam_video'
+output_dir: './tracking_results/bedlam_video_late_8'
 
 eval_datasets_used: ['3dpw']
 eval_datasets_split: ['test']
@@ -18,7 +18,11 @@ eval_batch_size: 1
 eval_num_workers: 10
 distributed_eval: True
 
-iou_match_thresh: 0.5
+iou_type: 'query'
+prev_query_num: 7
+is_gt: False
+
+iou_match_thresh: 0.1
 iou_new_thresh: 0.5
 is_add_new: True
 is_size_filter: False
@@ -26,7 +30,7 @@ nms_threshold: 0.7
 pr_conf_thresh: 0.9
 max_age: 5
 memory_update_type: 'sim'
-memory_update_early: true
+memory_update_early: False
 
 video_model: True
 video_stride: 8

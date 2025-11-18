@@ -910,11 +910,14 @@ class VideoModel(nn.Module):
                         out = torch.einsum('bln,bnc->blc', affinity, V)
 
                         pr_tgt = out
+                    else:
+                        bias = bias.expand(1, self.tracking_query_cross_attn.num_heads, q_len, kv_len).contiguous()
+                        pr_tgt = ori_queries + self.tracking_query_cross_attn(q=ori_queries, k=q_bank, v=q_bank, attn_bias=bias)
             else:
                 if 'init_boxes' not in targets[0] and hasattr(self, 'tracker') and len(self.tracker.tracks) != 0 and pr_tgt is not None:
                     frame_buckets = defaultdict(list)
                     pr_pad = pr_tgt.shape[1]
-                    query_bank = [v['prev_query_list'] for k, v in self.tracker.tracks.items() if v['age'] == 0]
+                    query_bank = [v['prev_ori_query_list'] for k, v in self.tracker.tracks.items() if v['age'] == 0]
                     ori_queries = pr_tgt.clone()
                     device = tgt.device
 
@@ -922,7 +925,7 @@ class VideoModel(nn.Module):
                         if v['age'] != 0:
                             continue
                         # print(k)
-                        for t, q in enumerate(v['prev_query_list']):
+                        for t, q in enumerate(v['prev_ori_query_list']):
                             if q is None:
                                 continue
                             if isinstance(q, (list, tuple)):
@@ -996,9 +999,11 @@ class VideoModel(nn.Module):
 
                         pr_tgt = out
 
-                    # else:
-                    #     bias = bias.expand(1, self.tracking_query_cross_attn.num_heads, q_len, kv_len).contiguous()
-                    #     hs[-1][:, -(pr_pad + self.num_queries):-self.num_queries] = ori_queries + self.tracking_query_cross_attn(q=ori_queries, k=q_bank, v=q_bank, attn_bias=bias)
+                    else:
+                        bias = bias.expand(1, self.tracking_query_cross_attn.num_heads, q_len, kv_len).contiguous()
+                        pr_tgt = ori_queries + self.tracking_query_cross_attn(q=ori_queries, k=q_bank, v=q_bank, attn_bias=bias)
+        if 'is_trkquery' in targets[0] and not targets[0]['is_trkquery']:
+            _boxes = []
         
                
 
@@ -1425,7 +1430,7 @@ class VideoModel(nn.Module):
                 
                 gt_num = len(targets[0]['init_boxes'])
                 if self.memory_update_early:
-                    self.tracker.add_from_gt(boxes[:gt_num], confs[:gt_num], qidx[:gt_num], kps=kp2ds[:,:25][:gt_num], querys=ori_querys[0][:gt_num], ori_querys=ori_querys[0][:gt_num])
+                    self.tracker.add_from_gt(boxes[:gt_num], confs[:gt_num], qidx[:gt_num], kps=kp2ds[:,:25][:gt_num], querys=querys[0][:gt_num], ori_querys=ori_querys[0][:gt_num])
                 else:
                     self.tracker.add_from_gt(boxes[:gt_num], confs[:gt_num], qidx[:gt_num], kps=kp2ds[:,:25][:gt_num], querys=querys[0][:gt_num], ori_querys=ori_querys[0][:gt_num])
         elif not self.training and hasattr(self, 'is_tracking_eval') and self.is_tracking_eval:
@@ -1475,12 +1480,12 @@ class VideoModel(nn.Module):
                     gt_boxes[:, 2] = gt_boxes[:, 2] * self.input_size
                     gt_boxes[:, 3] = gt_boxes[:, 3] * self.input_size
                     if self.memory_update_early:
-                        active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=ori_querys, gt_boxes=gt_boxes, ori_querys=ori_querys)
+                        active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=querys, gt_boxes=gt_boxes, ori_querys=ori_querys)
                     else:
                         active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=querys, gt_boxes=gt_boxes, ori_querys=ori_querys)
                 else:
                     if self.memory_update_early:
-                        active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=ori_querys, ori_querys=ori_querys)
+                        active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=querys, ori_querys=ori_querys)
                     else:
                         active_ids, id2qidx, id2origin = self.tracker.update(boxes, confs, qidx, kp2ds[:,:25], querys=querys, ori_querys=ori_querys)
 

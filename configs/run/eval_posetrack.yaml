@@ -12,7 +12,7 @@ pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_10/pytorch_model.
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_noise/pytorch_model.bin'
 
 input_dir: './data/datasets/Posetrack/PoseTrack2018/images/val'
-output_dir: './tracking_results/baseline_trn_new'
+output_dir: './tracking_results/baseline_trn_new_img'
 # conf_thresh: [0.15]
 conf_thresh: [0.15]
 infer_batch_size: 1

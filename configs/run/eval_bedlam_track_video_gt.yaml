@@ -8,7 +8,7 @@ pretrain: True
 pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_early_4/pytorch_model.bin'
 
 input_dir: './data/datasets/bedlam/train_images/20221019_3-8_250_highbmihand_orbit_stadium_6fps/png'
-output_dir: './tracking_results/bedlam_video'
+output_dir: './tracking_results/bedlam_video_gt'
 
 eval_datasets_used: ['3dpw']
 eval_datasets_split: ['test']
@@ -17,6 +17,8 @@ conf_thresh: [0.1]
 eval_batch_size: 1
 eval_num_workers: 10
 distributed_eval: True
+
+is_gt: true
 
 iou_match_thresh: 0.5
 iou_new_thresh: 0.5

@@ -13,10 +13,10 @@ pretrain: True
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_noise/pytorch_model.bin'
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_sim/pytorch_model.bin'
 # pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_early_8/pytorch_model.bin'
-pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_early_4/pytorch_model.bin'
+pretrain_path: '/home/cglee/SAT-HMR/outputs/ckpts/train_server_early_8/pytorch_model.bin'
 
 input_dir: './data/datasets/Posetrack/PoseTrack2018/images/val'
-output_dir: './tracking_results/baseline_trn_new_video_early_4'
+output_dir: './tracking_results/baseline_trn_new_video_early_8'
 conf_thresh: [0.15]
 # conf_thresh: [0.2]
 infer_batch_size: 1
@@ -32,6 +32,9 @@ is_gt: False
 # is_size_filter: True
 # nms_threshold: 0.7
 # pr_conf_thresh: 0.9
+
+iou_type: 'iou'
+prev_query_num: 7
 
 iou_match_thresh: 0.3
 iou_new_thresh: 0.5

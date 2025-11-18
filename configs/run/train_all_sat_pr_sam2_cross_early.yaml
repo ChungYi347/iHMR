@@ -43,7 +43,7 @@ set_cost_kpts: 20
 video_stride: 4
 # memory_update_type: 'sim'
 # memory_update_type: 'cross'
-memory_update_early: true
+memory_update_early: false
 memory_update_type: 'cross'
 # train aug
 aug_cfg:
